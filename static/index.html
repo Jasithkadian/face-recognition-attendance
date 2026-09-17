@@ -184,7 +184,7 @@
                 <h4>Admin Authentication Required</h4>
                 <p>Enter the admin token to unlock multi-sample face enrollment.</p>
                 <div class="token-input-group">
-                  <input type="password" id="inlineAdminToken" placeholder="Enter Admin Token (default: admin123)" class="text-input">
+                  <input type="password" id="inlineAdminToken" placeholder="Enter ADMIN_TOKEN (from Render env)" class="text-input">
                   <button class="btn-accent" onclick="unlockAdminInline()">Unlock</button>
                 </div>
                 <div id="inlineTokenError" class="alert-error hidden"></div>
@@ -309,7 +309,7 @@
         <p>Enter your <strong>ADMIN_TOKEN</strong> below. Required for face enrollment and roster management.</p>
         <div class="form-group" style="margin-top: 1rem;">
           <label for="modalAdminToken">Admin Token</label>
-          <input type="password" id="modalAdminToken" class="text-input" placeholder="Enter ADMIN_TOKEN (default: admin123)">
+          <input type="password" id="modalAdminToken" class="text-input" placeholder="Enter ADMIN_TOKEN (from Render env)">
         </div>
         <div id="modalTokenFeedback" class="alert-error hidden"></div>
       </div>
