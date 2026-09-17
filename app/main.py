@@ -24,6 +24,7 @@ from recognizer import (
     compute_encoding_from_bgr,
     compute_encoding_and_box,
     compute_averaged_encoding_from_images,
+    validate_enrollment_sample,
 )
 
 
@@ -72,6 +73,7 @@ class EnrollRequest(BaseModel):
 
 class VerifySampleRequest(BaseModel):
     image: str  # Base64 data URL string
+    existing_images: Optional[List[str]] = None  # Already collected sample base64 strings for duplicate check
 
 
 class VerifyTokenRequest(BaseModel):
@@ -114,8 +116,8 @@ def verify_token(req: VerifyTokenRequest):
 @app.post("/api/recognize")
 def recognize_frame(req: RecognizeRequest):
     """
-    Accepts a base64 camera frame, performs face detection + recognition,
-    logs presence in DB for recognized individuals (max once per 60s), and returns bounding boxes and names.
+    Accepts a base64 camera frame, performs face detection + IoU tracking + recognition,
+    logs presence in DB for recognized individuals (max once per 60s), and returns tracked bounding boxes and names.
     """
     if recognizer_instance is None:
         raise HTTPException(status_code=500, detail="Recognizer not initialized.")
@@ -129,7 +131,7 @@ def recognize_frame(req: RecognizeRequest):
 
     # Log presence for any recognized faces with distance score (throttled to 1 write per 60s per person)
     for m in result.get("matches", []):
-        if m["employee_id"] is not None:
+        if m.get("employee_id") is not None:
             try:
                 database.log_presence(m["employee_id"], distance=m.get("distance"), min_interval_seconds=60)
             except Exception as e:
@@ -141,17 +143,13 @@ def recognize_frame(req: RecognizeRequest):
 @app.post("/api/enroll-check")
 def verify_enrollment_sample(req: VerifySampleRequest):
     """
-    Verifies if a candidate camera frame contains exactly 1 detectable face.
-    Used by frontend auto-capture to ensure samples are only taken when a face is present.
+    Verifies if a candidate camera frame contains exactly 1 detectable face
+    and rejects duplicate/near-identical pose frames compared to existing samples.
     """
     try:
         frame_bgr = decode_base64_image(req.image)
-        enc, box, count = compute_encoding_and_box(frame_bgr)
-        if count == 0:
-            return {"valid": False, "reason": "No face detected in frame"}
-        if count > 1:
-            return {"valid": False, "reason": "Multiple faces detected — please ensure only 1 person is in frame"}
-        return {"valid": True, "box": list(box) if box else None}
+        valid, reason, box = validate_enrollment_sample(frame_bgr, req.existing_images)
+        return {"valid": valid, "reason": reason, "box": box}
     except Exception as e:
         return {"valid": False, "reason": f"Sample verification failed: {str(e)}"}
 

@@ -418,11 +418,14 @@ async function processEnrollmentTick() {
     const captureCanvas = captureFrameCanvas(400);
     const base64Image = captureCanvas.toDataURL('image/jpeg', 0.85);
 
-    // ML Face Check call to backend: verify face detection before accepting sample
+    // ML Face Check call to backend: verify face detection and duplicate pose rejection
     const resp = await fetch('/api/enroll-check', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: base64Image })
+      body: JSON.stringify({
+        image: base64Image,
+        existing_images: enrollmentSamples
+      })
     });
 
     if (resp.ok) {
