@@ -1,0 +1,8 @@
+detection/
+__pycache__/
+app/__pycache__/
+*.pyc
+data/*.db
+.env
+.venv/
+env/

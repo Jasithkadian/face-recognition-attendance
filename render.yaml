@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: face-recognition-attendance
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: DATA_DIR
+        value: /var/data
