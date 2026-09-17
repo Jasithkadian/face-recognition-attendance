@@ -1,7 +1,7 @@
 """
 recognizer.py
 Wraps face detection and recognition logic using OpenCV and face_recognition.
-Provides methods for processing live video frames, base64 images, and Streamlit image feeds.
+Provides methods for processing live video frames and base64 images.
 """
 
 import cv2
@@ -11,10 +11,7 @@ import base64
 import io
 from PIL import Image
 
-try:
-    from app import database
-except ImportError:
-    import database
+from app import database
 
 # Lower = stricter match. 0.55 is a balanced threshold for face_recognition
 MATCH_TOLERANCE = 0.55
