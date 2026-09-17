@@ -143,9 +143,9 @@ async function startCamera() {
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
 
-    // Frame recognition tick loop (every 400ms)
+    // Frame recognition tick loop (every 1500ms to reduce CPU load on free tier)
     if (recognitionInterval) clearInterval(recognitionInterval);
-    recognitionInterval = setInterval(captureAndRecognizeFrame, 400);
+    recognitionInterval = setInterval(captureAndRecognizeFrame, 1500);
 
   } catch (err) {
     console.error('Camera access error:', err);
@@ -197,11 +197,22 @@ async function captureAndRecognizeFrame() {
   isProcessingFrame = true;
 
   try {
+    const srcWidth = webcam.videoWidth || 640;
+    const srcHeight = webcam.videoHeight || 480;
+    const maxWidth = 400; // Downscale frame to maximum width of 400px
+
+    let targetWidth = srcWidth;
+    let targetHeight = srcHeight;
+    if (srcWidth > maxWidth) {
+      targetWidth = maxWidth;
+      targetHeight = Math.round((srcHeight * maxWidth) / srcWidth);
+    }
+
     const captureCanvas = document.createElement('canvas');
-    captureCanvas.width = webcam.videoWidth || 640;
-    captureCanvas.height = webcam.videoHeight || 480;
+    captureCanvas.width = targetWidth;
+    captureCanvas.height = targetHeight;
     const captureCtx = captureCanvas.getContext('2d');
-    captureCtx.drawImage(webcam, 0, 0, captureCanvas.width, captureCanvas.height);
+    captureCtx.drawImage(webcam, 0, 0, targetWidth, targetHeight);
 
     const base64Image = captureCanvas.toDataURL('image/jpeg', 0.7);
 

@@ -21,6 +21,17 @@ MATCH_TOLERANCE = 0.55
 
 # Shrinking frames before detection accelerates CPU recognition speed
 DETECTION_SCALE = 0.25
+MAX_FRAME_WIDTH = 480
+
+
+def resize_if_large(frame_bgr, max_width=MAX_FRAME_WIDTH):
+    """Safety resize step: downscales BGR image if width exceeds max_width."""
+    h, w = frame_bgr.shape[:2]
+    if w > max_width:
+        new_w = max_width
+        new_h = int(h * (max_width / w))
+        return cv2.resize(frame_bgr, (new_w, new_h))
+    return frame_bgr
 
 
 class FaceRecognizer:
@@ -42,6 +53,7 @@ class FaceRecognizer:
         Takes a BGR OpenCV numpy array.
         Returns a dict containing frame dimensions and list of match dicts.
         """
+        frame_bgr = resize_if_large(frame_bgr)
         h, w = frame_bgr.shape[:2]
         small = cv2.resize(frame_bgr, (0, 0), fx=DETECTION_SCALE, fy=DETECTION_SCALE)
         rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
@@ -116,6 +128,7 @@ def decode_base64_image(base64_str: str):
 
 def compute_encoding_from_bgr(frame_bgr):
     """Extracts the 128-d face encoding vector from the first detected face in a frame."""
+    frame_bgr = resize_if_large(frame_bgr)
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     boxes = face_recognition.face_locations(rgb, model="hog")
     if not boxes:
@@ -126,6 +139,7 @@ def compute_encoding_from_bgr(frame_bgr):
 
 def compute_encoding_and_box(frame_bgr):
     """Extracts encoding, box location, and total face count for detected face(s)."""
+    frame_bgr = resize_if_large(frame_bgr)
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     boxes = face_recognition.face_locations(rgb, model="hog")
     if not boxes:
