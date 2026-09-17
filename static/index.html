@@ -3,40 +3,35 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FacePulse AI — Smart Office Face Recognition & Attendance</title>
+  <title>Office Attendance Monitor</title>
   <!-- Google Fonts: Plus Jakarta Sans -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   
   <div class="app-container">
     
-    <!-- Top Navigation Header -->
+    <!-- Header Bar -->
     <header class="navbar">
       <div class="brand">
-        <div class="brand-logo">
-          <div class="brand-icon-bg">👤</div>
-        </div>
         <div class="brand-text">
-          <h1>FacePulse <span class="badge-tag">PRO</span></h1>
-          <p class="brand-sub">Smart Office Attendance & Biometric Monitoring</p>
+          <h1>Office Attendance Monitor</h1>
+          <p class="brand-sub">Live face tracking and presence log</p>
         </div>
       </div>
 
-      <!-- Quick KPI Stat Chips -->
+      <!-- Stat Counters -->
       <div class="header-kpis">
         <div class="kpi-chip">
-          <span class="kpi-icon">👀</span>
           <div class="kpi-data">
-            <span class="kpi-label">Currently Active</span>
+            <span class="kpi-label">Active Now</span>
             <span id="kpiPresent" class="kpi-val">0</span>
           </div>
         </div>
         <div class="kpi-chip">
-          <span class="kpi-icon">👥</span>
           <div class="kpi-data">
             <span class="kpi-label">Enrolled Roster</span>
             <span id="kpiEnrolled" class="kpi-val">0</span>
@@ -50,72 +45,64 @@
           <span class="pulse-text" id="statusText">System Ready</span>
         </div>
         <button id="adminToggleBtn" class="btn-secondary btn-sm" onclick="toggleAdminModal()">
-          <span id="adminLockIcon">🔒</span>
           <span id="adminLockText">Admin Settings</span>
         </button>
       </div>
     </header>
 
-    <!-- Main Dashboard Grid Layout -->
+    <!-- Main Grid -->
     <main class="dashboard-grid">
       
-      <!-- Left Column: Camera Feed Viewport Card -->
+      <!-- Live Camera Viewport -->
       <section class="card camera-card">
         <div class="card-header">
           <div class="card-title">
-            <span class="icon-badge">🎥</span>
             <div>
-              <h2>Live Camera Feed</h2>
-              <p class="card-subtitle">Real-time ML face detection & presence tracking</p>
+              <h2>Live Camera</h2>
+              <p class="card-subtitle">Real-time detection and tracking</p>
             </div>
           </div>
           <div class="card-header-tags">
             <span id="resTag" class="info-tag hidden">640x480</span>
             <div id="recognizingBadge" class="recognizing-tag hidden">
               <span class="spinner-small"></span>
-              <span>ML Inference Active</span>
+              <span>Processing</span>
             </div>
           </div>
         </div>
 
-        <!-- Camera Viewport Container -->
         <div class="viewport-wrapper">
           <video id="webcam" autoplay playsinline muted></video>
           <canvas id="overlayCanvas"></canvas>
           
-          <!-- Animated Face Guide Overlay -->
           <div id="faceGuide" class="face-guide hidden">
             <div class="guide-ellipse"></div>
             <span class="guide-text">Position face inside guide circle</span>
           </div>
 
-          <!-- Scan Line Animation -->
           <div id="scanLine" class="scan-line hidden"></div>
 
-          <!-- Camera Placeholder (Offline state) -->
           <div id="cameraPlaceholder" class="camera-placeholder">
             <div class="placeholder-content">
-              <div class="placeholder-icon-glow">📸</div>
-              <h3>Camera Inactive</h3>
-              <p>Launch live webcam stream for ML recognition and presence logging.</p>
+              <h3>Camera Off</h3>
+              <p>Turn on the camera to start live tracking and attendance recording.</p>
               <button class="btn-primary btn-lg" onclick="startCamera()">
-                <span>▶ Start Camera Feed</span>
+                Start Camera
               </button>
             </div>
           </div>
         </div>
 
-        <!-- Camera Toolbar & Selector -->
         <div class="camera-controls">
           <div class="btn-group">
             <button id="startCamBtn" class="btn-primary" onclick="startCamera()">
-              <span>▶ Start Camera</span>
+              Start Camera
             </button>
             <button id="stopCamBtn" class="btn-danger hidden" onclick="stopCamera()">
-              <span>⏹ Stop Camera</span>
+              Stop Camera
             </button>
-            <button id="toggleGuideBtn" class="btn-secondary btn-icon" title="Toggle Face Alignment Guide" onclick="toggleFaceGuide()">
-              <span>🎯 Alignment Guide</span>
+            <button id="toggleGuideBtn" class="btn-secondary" onclick="toggleFaceGuide()">
+              Alignment Guide
             </button>
           </div>
 
@@ -127,84 +114,78 @@
         </div>
       </section>
 
-      <!-- Right Column: Tabbed Interactive Panels -->
+      <!-- Sidebar Column -->
       <aside class="sidebar-column">
         
-        <!-- Tab Navigation Header -->
+        <!-- Tab Navigation -->
         <div class="tab-nav">
           <button class="tab-btn active" onclick="switchTab('presentTab', this)">
-            <span>👀 Present</span>
+            <span>Active Attendees</span>
             <span id="presentTabBadge" class="tab-badge">0</span>
           </button>
           <button class="tab-btn" onclick="switchTab('enrollTab', this)">
-            <span>👤 Enroll</span>
+            <span>Register Person</span>
           </button>
           <button class="tab-btn" onclick="switchTab('rosterTab', this)">
-            <span>📋 Roster</span>
+            <span>Enrolled Roster</span>
             <span id="rosterTabBadge" class="tab-badge">0</span>
           </button>
           <button class="tab-btn" onclick="switchTab('logTab', this)">
-            <span>📊 Activity Log</span>
+            <span>Attendance History</span>
           </button>
         </div>
 
-        <!-- Tab 1: Currently Present -->
+        <!-- Tab 1: Active Attendees -->
         <div id="presentTab" class="tab-content active">
           <section class="card panel-card">
             <div class="card-header">
               <div class="card-title">
-                <h2>Currently Present</h2>
+                <h2>Active Attendees</h2>
               </div>
               <span id="presentCount" class="count-badge">0 Active</span>
             </div>
             
             <div id="presentList" class="user-chip-list">
               <div class="empty-state">
-                <span class="empty-icon">👤</span>
-                <p>No faces detected in camera feed right now</p>
+                <p>No active faces in view right now</p>
               </div>
             </div>
           </section>
         </div>
 
-        <!-- Tab 2: Enroll New Face (Guided Multi-Sample) -->
+        <!-- Tab 2: Register Person -->
         <div id="enrollTab" class="tab-content">
           <section class="card panel-card">
             <div class="card-header">
               <div class="card-title">
-                <h2>15-Sample Guided Enrollment</h2>
+                <h2>Register Person</h2>
               </div>
-              <span id="enrollAdminBadge" class="admin-badge locked">🔒 Admin Gated</span>
+              <span id="enrollAdminBadge" class="admin-badge locked">Admin Locked</span>
             </div>
 
-            <!-- Admin Lock View -->
             <div id="enrollLockedView" class="enroll-locked">
               <div class="lock-box">
-                <div class="lock-icon">🔐</div>
-                <h4>Admin Authentication Required</h4>
-                <p>Enter the admin token to unlock multi-sample face enrollment.</p>
+                <h4>Admin Access Required</h4>
+                <p>Enter the admin token to unlock multi-angle face registration.</p>
                 <div class="token-input-group">
-                  <input type="password" id="inlineAdminToken" placeholder="Enter ADMIN_TOKEN (from Render env)" class="text-input">
+                  <input type="password" id="inlineAdminToken" placeholder="Enter ADMIN_TOKEN" class="text-input">
                   <button class="btn-accent" onclick="unlockAdminInline()">Unlock</button>
                 </div>
                 <div id="inlineTokenError" class="alert-error hidden"></div>
               </div>
             </div>
 
-            <!-- Enrollment Form View -->
             <div id="enrollUnlockedView" class="enroll-form hidden">
               <div class="form-group">
                 <label for="employeeName">Full Name</label>
                 <input type="text" id="employeeName" placeholder="e.g. Jane Doe" class="text-input" autocomplete="off">
               </div>
 
-              <!-- Guided Pose Banner & Progress -->
               <div id="guidedEnrollContainer" class="guided-enroll-box">
                 <div class="guided-header">
-                  <div id="poseIcon" class="pose-icon">👤</div>
                   <div class="pose-info">
                     <h4 id="poseTitle">Ready to Start</h4>
-                    <p id="poseInstruction">Enter name and click "Start 15-Sample Enrollment".</p>
+                    <p id="poseInstruction">Enter name and click "Start Registration".</p>
                   </div>
                 </div>
 
@@ -216,18 +197,16 @@
                   <span id="enrollPercent">0%</span>
                 </div>
 
-                <!-- 15 Sample Thumbnails Grid -->
                 <div id="sampleThumbnails" class="thumbnails-grid">
-                  <!-- Generated by JS -->
                 </div>
               </div>
 
               <div class="enroll-actions">
                 <button id="enrollBtn" class="btn-accent btn-block" onclick="startGuidedEnrollment()">
-                  <span>📸 Start 15-Sample Guided Enrollment</span>
+                  Start Registration (15 Multi-Angle Samples)
                 </button>
                 <button id="cancelEnrollBtn" class="btn-secondary btn-block hidden" onclick="cancelGuidedEnrollment()">
-                  <span>❌ Cancel Enrollment</span>
+                  Cancel Registration
                 </button>
               </div>
 
@@ -247,29 +226,29 @@
             </div>
 
             <div class="search-box">
-              <input type="text" id="rosterSearch" placeholder="🔍 Search roster by name..." onkeyup="filterRoster()" class="text-input text-input-sm">
+              <input type="text" id="rosterSearch" placeholder="Search roster by name..." onkeyup="filterRoster()" class="text-input text-input-sm">
             </div>
 
             <div id="rosterList" class="roster-list">
               <div class="empty-state">
-                <p>Loading enrolled roster...</p>
+                <p>Loading roster...</p>
               </div>
             </div>
           </section>
         </div>
 
-        <!-- Tab 4: Activity Log -->
+        <!-- Tab 4: Attendance History -->
         <div id="logTab" class="tab-content">
           <section class="card panel-card">
             <div class="card-header">
               <div class="card-title">
-                <h2>Detailed Activity Log</h2>
+                <h2>Attendance History</h2>
               </div>
-              <button class="btn-secondary btn-sm" onclick="fetchActivityLog()">🔄 Refresh</button>
+              <button class="btn-secondary btn-sm" onclick="fetchActivityLog()">Refresh</button>
             </div>
 
             <div class="log-filter-bar">
-              <input type="text" id="logSearch" placeholder="Filter by person..." class="text-input text-input-sm" onkeyup="fetchActivityLog()">
+              <input type="text" id="logSearch" placeholder="Filter by name..." class="text-input text-input-sm" onkeyup="fetchActivityLog()">
               <input type="date" id="logDate" class="text-input text-input-sm" onchange="fetchActivityLog()">
             </div>
 
@@ -277,7 +256,7 @@
               <table class="log-table">
                 <thead>
                   <tr>
-                    <th>Timestamp</th>
+                    <th>Time</th>
                     <th>Person</th>
                     <th>Confidence</th>
                     <th>Distance</th>
@@ -302,20 +281,20 @@
   <div id="adminModal" class="modal-backdrop hidden">
     <div class="modal-box">
       <div class="modal-header">
-        <h3>🔒 Admin Access Settings</h3>
+        <h3>Admin Access Settings</h3>
         <button class="modal-close" onclick="toggleAdminModal()">&times;</button>
       </div>
       <div class="modal-body">
-        <p>Enter your <strong>ADMIN_TOKEN</strong> below. Required for face enrollment and roster management.</p>
+        <p>Enter your <strong>ADMIN_TOKEN</strong> below.</p>
         <div class="form-group" style="margin-top: 1rem;">
           <label for="modalAdminToken">Admin Token</label>
-          <input type="password" id="modalAdminToken" class="text-input" placeholder="Enter ADMIN_TOKEN (from Render env)">
+          <input type="password" id="modalAdminToken" class="text-input" placeholder="Enter ADMIN_TOKEN">
         </div>
         <div id="modalTokenFeedback" class="alert-error hidden"></div>
       </div>
       <div class="modal-footer">
         <button class="btn-secondary" onclick="toggleAdminModal()">Cancel</button>
-        <button class="btn-primary" onclick="saveAdminTokenModal()">Save & Authenticate</button>
+        <button class="btn-primary" onclick="saveAdminTokenModal()">Save</button>
       </div>
     </div>
   </div>

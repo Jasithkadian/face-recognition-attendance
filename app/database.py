@@ -113,11 +113,13 @@ def get_all_people():
 def log_presence(employee_id: int, distance: float = None, min_interval_seconds: int = 60) -> bool:
     """
     Log presence for an employee max once per min_interval_seconds (default 60s).
-    Prevents duplicate database entries on consecutive 1.5s recognition ticks.
+    Stores explicit UTC ISO timestamp to prevent timezone mismatches.
     Returns True if logged, False if throttled.
     """
     conn = get_connection()
     cur = conn.cursor()
+
+    now = datetime.datetime.now(datetime.timezone.utc)
 
     # Check last logged entry for this employee
     cur.execute(
@@ -125,11 +127,13 @@ def log_presence(employee_id: int, distance: float = None, min_interval_seconds:
         (employee_id,)
     )
     last_row = cur.fetchone()
-    now = datetime.datetime.now()
 
     if last_row:
         try:
-            last_time = datetime.datetime.fromisoformat(last_row["seen_at"])
+            last_str = last_row["seen_at"]
+            if not last_str.endswith("Z") and "+" not in last_str and "-" not in last_str[10:]:
+                last_str += "+00:00"
+            last_time = datetime.datetime.fromisoformat(last_str)
             if (now - last_time).total_seconds() < min_interval_seconds:
                 conn.close()
                 return False

@@ -181,9 +181,9 @@ async function startCamera() {
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
 
-    // Frame recognition tick loop (every 1500ms to optimize Render CPU load)
+    // Frame recognition tick loop (750ms for responsive face tracking during motion)
     if (recognitionInterval) clearInterval(recognitionInterval);
-    recognitionInterval = setInterval(captureAndRecognizeFrame, 1500);
+    recognitionInterval = setInterval(captureAndRecognizeFrame, 750);
 
   } catch (err) {
     console.error('Camera access error:', err);
@@ -783,7 +783,11 @@ function escapeHtml(str) {
 function formatTime(isoStr) {
   if (!isoStr) return '';
   try {
-    const d = new Date(isoStr);
+    let str = isoStr;
+    if (typeof str === 'string' && !str.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(str)) {
+      str += 'Z';
+    }
+    const d = new Date(str);
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + 
            ' (' + d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ')';
   } catch {

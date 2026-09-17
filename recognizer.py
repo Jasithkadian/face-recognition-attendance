@@ -130,7 +130,17 @@ class FaceTracker:
                 track = self.tracks[i]
                 det = detected_matches[j]
 
-                track.box = det["box"]
+                # Exponential Moving Average (EMA) smoothing on box coordinates for motion stability (Bug 2 fix)
+                alpha = 0.65
+                old_t, old_r, old_b, old_l = track.box
+                new_t, new_r, new_b, new_l = det["box"]
+                track.box = [
+                    int(alpha * new_t + (1 - alpha) * old_t),
+                    int(alpha * new_r + (1 - alpha) * old_r),
+                    int(alpha * new_b + (1 - alpha) * old_b),
+                    int(alpha * new_l + (1 - alpha) * old_l),
+                ]
+
                 track.disappeared = 0
                 track.hits += 1
                 track.last_seen = time.time()
@@ -175,9 +185,32 @@ class FaceTracker:
         # Retain tracks within disappearance tolerance (max 5 missed frames)
         self.tracks = [t for t in self.tracks if t.disappeared <= self.max_disappeared]
 
+        # Bug 1 Fix: Deduplicate overlapping tracks (Non-Maximum Suppression)
+        # Ensure only 1 active track per physical face is rendered, preventing double-box artifacts
+        active_tracks = [t for t in self.tracks if t.disappeared == 0]
+        if not active_tracks and self.tracks:
+            # Fallback to most recently updated track if brief occlusion occurred
+            active_tracks = [sorted(self.tracks, key=lambda t: t.disappeared)[0]]
+
+        deduped_tracks = []
+        for t in active_tracks:
+            keep = True
+            for existing in deduped_tracks:
+                if calculate_iou(t.box, existing.box) > 0.35:
+                    keep = False
+                    # Keep track with higher hits / valid employee ID
+                    if t.employee_id is not None and existing.employee_id is None:
+                        existing.name = t.name
+                        existing.employee_id = t.employee_id
+                        existing.confidence = t.confidence
+                        existing.distance = t.distance
+                    break
+            if keep:
+                deduped_tracks.append(t)
+
         # Format output
         result = []
-        for t in self.tracks:
+        for t in deduped_tracks:
             result.append({
                 "track_id": t.track_id,
                 "name": t.name,
