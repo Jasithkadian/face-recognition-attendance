@@ -20,6 +20,7 @@ from pydantic import BaseModel
 import app.database as database
 from recognizer import FaceRecognizer, decode_base64_image, compute_encoding_from_bgr
 
+
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
 if not ADMIN_TOKEN:
     sys.exit("FATAL: ADMIN_TOKEN environment variable is not set. Refusing to start with no admin protection.")
