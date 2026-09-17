@@ -110,20 +110,22 @@ def get_all_people():
     return [dict(r) for r in rows]
 
 
-def log_presence(employee_id: int, distance: float = None, min_interval_seconds: int = 60) -> bool:
+def log_presence(employee_id: int, distance: float = None, min_interval_seconds: int = 30) -> bool:
     """
-    Log presence for an employee max once per min_interval_seconds (default 60s).
-    Stores explicit UTC ISO timestamp to prevent timezone mismatches.
-    Returns True if logged, False if throttled.
+    Log presence for an employee.
+    If seen within min_interval_seconds (default 30s), updates seen_at on the existing record
+    to keep active presence fresh while avoiding duplicate activity log spam.
+    Otherwise inserts a new record.
     """
     conn = get_connection()
     cur = conn.cursor()
 
     now = datetime.datetime.now(datetime.timezone.utc)
+    now_str = now.isoformat()
 
     # Check last logged entry for this employee
     cur.execute(
-        "SELECT seen_at FROM presence_log WHERE employee_id = ? ORDER BY id DESC LIMIT 1",
+        "SELECT id, seen_at FROM presence_log WHERE employee_id = ? ORDER BY id DESC LIMIT 1",
         (employee_id,)
     )
     last_row = cur.fetchone()
@@ -134,15 +136,24 @@ def log_presence(employee_id: int, distance: float = None, min_interval_seconds:
             if not last_str.endswith("Z") and "+" not in last_str and "-" not in last_str[10:]:
                 last_str += "+00:00"
             last_time = datetime.datetime.fromisoformat(last_str)
+            if last_time.tzinfo is None:
+                last_time = last_time.replace(tzinfo=datetime.timezone.utc)
+
             if (now - last_time).total_seconds() < min_interval_seconds:
+                # Update timestamp on latest row to keep presence active without creating duplicate log clutter
+                cur.execute(
+                    "UPDATE presence_log SET seen_at = ?, distance = ? WHERE id = ?",
+                    (now_str, distance, last_row["id"])
+                )
+                conn.commit()
                 conn.close()
-                return False
-        except Exception:
-            pass
+                return True
+        except Exception as e:
+            print(f"Error checking last presence: {e}")
 
     cur.execute(
         "INSERT INTO presence_log (employee_id, seen_at, distance) VALUES (?, ?, ?)",
-        (employee_id, now.isoformat(), distance),
+        (employee_id, now_str, distance),
     )
     conn.commit()
     conn.close()
@@ -152,26 +163,48 @@ def log_presence(employee_id: int, distance: float = None, min_interval_seconds:
 def get_recently_present(window_seconds: int = 20):
     """
     Employees whose face was detected within the last `window_seconds`.
-    Used to populate the "Currently Present" panel.
+    Used to populate the "Currently Present" / "Active Attendees" panel.
+    Safely calculates elapsed time in Python to avoid SQLite string timezone issues.
     """
     conn = get_connection()
     cur = conn.cursor()
-    cutoff = (
-        datetime.datetime.now() - datetime.timedelta(seconds=window_seconds)
-    ).isoformat()
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+
     rows = cur.execute(
         """
         SELECT e.name AS name, MAX(p.seen_at) AS last_seen, p.distance
         FROM presence_log p
         JOIN employees e ON e.id = p.employee_id
-        WHERE p.seen_at >= ?
         GROUP BY e.id
         ORDER BY last_seen DESC
-        """,
-        (cutoff,),
+        """
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+
+    result = []
+    for r in rows:
+        last_str = r["last_seen"]
+        if not last_str:
+            continue
+        try:
+            clean_str = last_str
+            if not clean_str.endswith("Z") and "+" not in clean_str and "-" not in clean_str[10:]:
+                clean_str += "+00:00"
+            dt = datetime.datetime.fromisoformat(clean_str)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+
+            elapsed = (now_utc - dt).total_seconds()
+            if elapsed <= window_seconds:
+                result.append({
+                    "name": r["name"],
+                    "last_seen": r["last_seen"],
+                    "distance": r["distance"],
+                })
+        except Exception as e:
+            print(f"Error parsing last_seen timestamp '{last_str}': {e}")
+
+    return result
 
 
 def get_today_summary():

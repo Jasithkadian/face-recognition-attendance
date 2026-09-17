@@ -129,13 +129,16 @@ def recognize_frame(req: RecognizeRequest):
 
     result = recognizer_instance.process_bgr_frame(frame_bgr)
 
-    # Log presence for any recognized faces with distance score (throttled to 1 write per 60s per person)
+    # Log presence for any recognized faces with distance score (keeps seen_at fresh, throttled to 30s session log)
     for m in result.get("matches", []):
         if m.get("employee_id") is not None:
             try:
-                database.log_presence(m["employee_id"], distance=m.get("distance"), min_interval_seconds=60)
+                database.log_presence(m["employee_id"], distance=m.get("distance"), min_interval_seconds=30)
             except Exception as e:
                 print(f"Error logging presence: {e}")
+
+    # Return updated active presence list directly in frame recognition response for instant frontend sync
+    result["present"] = database.get_recently_present(window_seconds=20)
 
     return result
 

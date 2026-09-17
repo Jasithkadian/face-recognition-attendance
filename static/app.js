@@ -273,6 +273,9 @@ async function captureAndRecognizeFrame() {
     if (resp.ok) {
       const data = await resp.json();
       drawOverlays(data.width || captureCanvas.width, data.height || captureCanvas.height, data.matches || []);
+      if (data.present !== undefined) {
+        updatePresentUI(data.present);
+      }
     }
   } catch (err) {
     console.warn('Frame recognition error:', err);
@@ -522,41 +525,41 @@ function resetEnrollmentUI() {
   renderThumbnailSlots();
 }
 
-// ---------------- Data Fetching & Roster ----------------
+function updatePresentUI(presentArray) {
+  const present = presentArray || [];
+  presentCount.textContent = `${present.length} Active`;
+  presentTabBadge.textContent = present.length;
+  kpiPresent.textContent = present.length;
+
+  if (present.length === 0) {
+    presentList.innerHTML = `
+      <div class="empty-state">
+        <p>No active faces in view right now</p>
+      </div>
+    `;
+    return;
+  }
+
+  presentList.innerHTML = present.map(p => {
+    const initial = p.name ? p.name.charAt(0).toUpperCase() : '?';
+    return `
+      <div class="user-chip">
+        <div class="user-avatar">${initial}</div>
+        <div class="user-info">
+          <span class="user-name">${escapeHtml(p.name)}</span>
+          <span class="user-time">● Active now</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
 
 async function fetchPresentList() {
   try {
     const resp = await fetch('/api/present?window_seconds=20');
     if (!resp.ok) return;
     const data = await resp.json();
-
-    const present = data.present || [];
-    presentCount.textContent = `${present.length} Active`;
-    presentTabBadge.textContent = present.length;
-    kpiPresent.textContent = present.length;
-
-    if (present.length === 0) {
-      presentList.innerHTML = `
-        <div class="empty-state">
-          <span class="empty-icon">👤</span>
-          <p>No faces detected in camera feed right now</p>
-        </div>
-      `;
-      return;
-    }
-
-    presentList.innerHTML = present.map(p => {
-      const initial = p.name ? p.name.charAt(0).toUpperCase() : '?';
-      return `
-        <div class="user-chip">
-          <div class="user-avatar">${initial}</div>
-          <div class="user-info">
-            <span class="user-name">${escapeHtml(p.name)}</span>
-            <span class="user-time">● Active now</span>
-          </div>
-        </div>
-      `;
-    }).join('');
+    updatePresentUI(data.present || []);
   } catch (err) {
     console.warn('Error fetching present list:', err);
   }
