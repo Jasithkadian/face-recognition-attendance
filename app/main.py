@@ -18,7 +18,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import app.database as database
-from recognizer import FaceRecognizer, decode_base64_image, compute_encoding_from_bgr
+from recognizer import (
+    FaceRecognizer,
+    decode_base64_image,
+    compute_encoding_from_bgr,
+    compute_encoding_and_box,
+    compute_averaged_encoding_from_images,
+)
 
 
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
@@ -59,8 +65,13 @@ class RecognizeRequest(BaseModel):
 
 class EnrollRequest(BaseModel):
     name: str
-    image: str  # Base64 data URL string
+    image: Optional[str] = None  # Single Base64 data URL string
+    images: Optional[List[str]] = None  # List of 15 Base64 data URL strings for multi-sample guided enrollment
     admin_token: str
+
+
+class VerifySampleRequest(BaseModel):
+    image: str  # Base64 data URL string
 
 
 class VerifyTokenRequest(BaseModel):
@@ -104,7 +115,7 @@ def verify_token(req: VerifyTokenRequest):
 def recognize_frame(req: RecognizeRequest):
     """
     Accepts a base64 camera frame, performs face detection + recognition,
-    logs presence in DB for recognized individuals, and returns bounding boxes and names.
+    logs presence in DB for recognized individuals (max once per 60s), and returns bounding boxes and names.
     """
     if recognizer_instance is None:
         raise HTTPException(status_code=500, detail="Recognizer not initialized.")
@@ -116,22 +127,40 @@ def recognize_frame(req: RecognizeRequest):
 
     result = recognizer_instance.process_bgr_frame(frame_bgr)
 
-    # Log presence for any recognized faces
+    # Log presence for any recognized faces with distance score (throttled to 1 write per 60s per person)
     for m in result.get("matches", []):
         if m["employee_id"] is not None:
             try:
-                database.log_presence(m["employee_id"])
+                database.log_presence(m["employee_id"], distance=m.get("distance"), min_interval_seconds=60)
             except Exception as e:
                 print(f"Error logging presence: {e}")
 
     return result
 
 
+@app.post("/api/enroll-check")
+def verify_enrollment_sample(req: VerifySampleRequest):
+    """
+    Verifies if a candidate camera frame contains exactly 1 detectable face.
+    Used by frontend auto-capture to ensure samples are only taken when a face is present.
+    """
+    try:
+        frame_bgr = decode_base64_image(req.image)
+        enc, box, count = compute_encoding_and_box(frame_bgr)
+        if count == 0:
+            return {"valid": False, "reason": "No face detected in frame"}
+        if count > 1:
+            return {"valid": False, "reason": "Multiple faces detected — please ensure only 1 person is in frame"}
+        return {"valid": True, "box": list(box) if box else None}
+    except Exception as e:
+        return {"valid": False, "reason": f"Sample verification failed: {str(e)}"}
+
+
 @app.post("/api/enroll")
 def enroll_employee(req: EnrollRequest):
     """
-    Enrolls a new person into the system. Requires valid admin_token.
-    Captures face encoding from the provided image and stores it in SQLite DB.
+    Enrolls a new person into the system using single or multi-sample guided enrollment.
+    Requires valid admin_token. Computes averaged 128-d face encoding from samples.
     """
     if req.admin_token != ADMIN_TOKEN:
         raise HTTPException(
@@ -143,17 +172,34 @@ def enroll_employee(req: EnrollRequest):
     if not clean_name:
         raise HTTPException(status_code=400, detail="Name cannot be empty.")
 
-    try:
-        frame_bgr = decode_base64_image(req.image)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid image format: {str(e)}")
+    encoding = None
+    samples_used = 1
 
-    encoding = compute_encoding_from_bgr(frame_bgr)
-    if encoding is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No face detected in the image. Please position your face clearly in front of the camera and try again.",
-        )
+    if req.images and len(req.images) > 0:
+        # Multi-sample guided enrollment path
+        avg_enc, count = compute_averaged_encoding_from_images(req.images)
+        if avg_enc is None or count == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not detect faces in the provided sample set. Please ensure good lighting and re-enroll.",
+            )
+        encoding = avg_enc
+        samples_used = count
+    elif req.image:
+        # Single-sample legacy enrollment path
+        try:
+            frame_bgr = decode_base64_image(req.image)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid image format: {str(e)}")
+
+        encoding = compute_encoding_from_bgr(frame_bgr)
+        if encoding is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No face detected in the image. Please position your face clearly in front of the camera and try again.",
+            )
+    else:
+        raise HTTPException(status_code=400, detail="No image data provided for enrollment.")
 
     try:
         emp_id = database.add_employee(clean_name, encoding)
@@ -168,9 +214,10 @@ def enroll_employee(req: EnrollRequest):
 
     return {
         "status": "success",
-        "message": f"Enrolled '{clean_name}' successfully!",
+        "message": f"Enrolled '{clean_name}' successfully using {samples_used} face samples!",
         "employee_id": emp_id,
         "name": clean_name,
+        "samples_used": samples_used,
     }
 
 
@@ -202,6 +249,13 @@ def delete_employee(employee_id: int, admin_token: str):
         recognizer_instance.refresh_known_faces()
 
     return {"status": "success", "message": "Employee deleted."}
+
+
+@app.get("/api/activity-log")
+def get_activity_log(limit: int = 100, name: Optional[str] = None, date: Optional[str] = None):
+    """Get detailed timestamped activity log records with ML match distance & confidence scores."""
+    logs = database.get_activity_log(limit=limit, name_filter=name, date_filter=date)
+    return {"logs": logs}
 
 
 @app.get("/api/today-summary")

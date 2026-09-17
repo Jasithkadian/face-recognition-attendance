@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FacePulse AI — Smart Face Recognition & Attendance</title>
+  <title>FacePulse AI — Smart Office Face Recognition & Attendance</title>
   <!-- Google Fonts: Plus Jakarta Sans -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,6 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="app-background-glow"></div>
   
   <div class="app-container">
     
@@ -19,12 +18,11 @@
     <header class="navbar">
       <div class="brand">
         <div class="brand-logo">
-          <span class="brand-sparkle">✨</span>
           <div class="brand-icon-bg">👤</div>
         </div>
         <div class="brand-text">
           <h1>FacePulse <span class="badge-tag">PRO</span></h1>
-          <p class="brand-sub">Real-Time Attendance & Biometric Monitoring</p>
+          <p class="brand-sub">Smart Office Attendance & Biometric Monitoring</p>
         </div>
       </div>
 
@@ -33,14 +31,14 @@
         <div class="kpi-chip">
           <span class="kpi-icon">👀</span>
           <div class="kpi-data">
-            <span class="kpi-label">Present</span>
+            <span class="kpi-label">Currently Active</span>
             <span id="kpiPresent" class="kpi-val">0</span>
           </div>
         </div>
         <div class="kpi-chip">
           <span class="kpi-icon">👥</span>
           <div class="kpi-data">
-            <span class="kpi-label">Enrolled</span>
+            <span class="kpi-label">Enrolled Roster</span>
             <span id="kpiEnrolled" class="kpi-val">0</span>
           </div>
         </div>
@@ -68,14 +66,14 @@
             <span class="icon-badge">🎥</span>
             <div>
               <h2>Live Camera Feed</h2>
-              <p class="card-subtitle">Real-time face detection & presence tracking</p>
+              <p class="card-subtitle">Real-time ML face detection & presence tracking</p>
             </div>
           </div>
           <div class="card-header-tags">
             <span id="resTag" class="info-tag hidden">640x480</span>
             <div id="recognizingBadge" class="recognizing-tag hidden">
               <span class="spinner-small"></span>
-              <span>Recognizing...</span>
+              <span>ML Inference Active</span>
             </div>
           </div>
         </div>
@@ -88,7 +86,7 @@
           <!-- Animated Face Guide Overlay -->
           <div id="faceGuide" class="face-guide hidden">
             <div class="guide-ellipse"></div>
-            <span class="guide-text">Position face inside circle</span>
+            <span class="guide-text">Position face inside guide circle</span>
           </div>
 
           <!-- Scan Line Animation -->
@@ -99,7 +97,7 @@
             <div class="placeholder-content">
               <div class="placeholder-icon-glow">📸</div>
               <h3>Camera Inactive</h3>
-              <p>Launch the live webcam feed to start monitoring presence and recognizing faces.</p>
+              <p>Launch live webcam stream for ML recognition and presence logging.</p>
               <button class="btn-primary btn-lg" onclick="startCamera()">
                 <span>▶ Start Camera Feed</span>
               </button>
@@ -117,13 +115,13 @@
               <span>⏹ Stop Camera</span>
             </button>
             <button id="toggleGuideBtn" class="btn-secondary btn-icon" title="Toggle Face Alignment Guide" onclick="toggleFaceGuide()">
-              <span>🎯 Guide</span>
+              <span>🎯 Alignment Guide</span>
             </button>
           </div>
 
           <div class="camera-select-wrapper">
             <select id="cameraSelect" onchange="switchCamera()" class="select-input">
-              <option value="">Detecting cameras...</option>
+              <option value="">Detecting camera input devices...</option>
             </select>
           </div>
         </div>
@@ -146,7 +144,7 @@
             <span id="rosterTabBadge" class="tab-badge">0</span>
           </button>
           <button class="tab-btn" onclick="switchTab('logTab', this)">
-            <span>📊 Daily Log</span>
+            <span>📊 Activity Log</span>
           </button>
         </div>
 
@@ -169,12 +167,12 @@
           </section>
         </div>
 
-        <!-- Tab 2: Enroll New Face -->
+        <!-- Tab 2: Enroll New Face (Guided Multi-Sample) -->
         <div id="enrollTab" class="tab-content">
           <section class="card panel-card">
             <div class="card-header">
               <div class="card-title">
-                <h2>Enroll New Person</h2>
+                <h2>15-Sample Guided Enrollment</h2>
               </div>
               <span id="enrollAdminBadge" class="admin-badge locked">🔒 Admin Gated</span>
             </div>
@@ -184,7 +182,7 @@
               <div class="lock-box">
                 <div class="lock-icon">🔐</div>
                 <h4>Admin Authentication Required</h4>
-                <p>Enter the admin access token to enable face enrollment.</p>
+                <p>Enter the admin token to unlock multi-sample face enrollment.</p>
                 <div class="token-input-group">
                   <input type="password" id="inlineAdminToken" placeholder="Enter Admin Token (default: admin123)" class="text-input">
                   <button class="btn-accent" onclick="unlockAdminInline()">Unlock</button>
@@ -200,14 +198,38 @@
                 <input type="text" id="employeeName" placeholder="e.g. Jane Doe" class="text-input" autocomplete="off">
               </div>
 
-              <div class="snapshot-preview-box">
-                <div class="preview-label">Live Camera Frame Preview</div>
-                <div id="previewStatus" class="preview-status">Camera status: Ready</div>
+              <!-- Guided Pose Banner & Progress -->
+              <div id="guidedEnrollContainer" class="guided-enroll-box">
+                <div class="guided-header">
+                  <div id="poseIcon" class="pose-icon">👤</div>
+                  <div class="pose-info">
+                    <h4 id="poseTitle">Ready to Start</h4>
+                    <p id="poseInstruction">Enter name and click "Start 15-Sample Enrollment".</p>
+                  </div>
+                </div>
+
+                <div class="progress-bar-wrapper">
+                  <div id="enrollProgressBar" class="progress-bar-fill" style="width: 0%;"></div>
+                </div>
+                <div class="progress-text-row">
+                  <span id="sampleCounter">Sample 0 of 15</span>
+                  <span id="enrollPercent">0%</span>
+                </div>
+
+                <!-- 15 Sample Thumbnails Grid -->
+                <div id="sampleThumbnails" class="thumbnails-grid">
+                  <!-- Generated by JS -->
+                </div>
               </div>
 
-              <button id="enrollBtn" class="btn-accent btn-block" onclick="enrollCurrentFace()">
-                <span>📸 Capture & Enroll Face</span>
-              </button>
+              <div class="enroll-actions">
+                <button id="enrollBtn" class="btn-accent btn-block" onclick="startGuidedEnrollment()">
+                  <span>📸 Start 15-Sample Guided Enrollment</span>
+                </button>
+                <button id="cancelEnrollBtn" class="btn-secondary btn-block hidden" onclick="cancelGuidedEnrollment()">
+                  <span>❌ Cancel Enrollment</span>
+                </button>
+              </div>
 
               <div id="enrollFeedback" class="feedback-banner hidden"></div>
             </div>
@@ -225,31 +247,49 @@
             </div>
 
             <div class="search-box">
-              <input type="text" id="rosterSearch" placeholder="🔍 Search roster..." onkeyup="filterRoster()" class="text-input text-input-sm">
+              <input type="text" id="rosterSearch" placeholder="🔍 Search roster by name..." onkeyup="filterRoster()" class="text-input text-input-sm">
             </div>
 
             <div id="rosterList" class="roster-list">
               <div class="empty-state">
-                <p>Loading roster...</p>
+                <p>Loading enrolled roster...</p>
               </div>
             </div>
           </section>
         </div>
 
-        <!-- Tab 4: Today's Log -->
+        <!-- Tab 4: Activity Log -->
         <div id="logTab" class="tab-content">
           <section class="card panel-card">
             <div class="card-header">
               <div class="card-title">
-                <h2>Today's Activity Log</h2>
+                <h2>Detailed Activity Log</h2>
               </div>
-              <button class="btn-secondary btn-sm" onclick="fetchTodayLog()">🔄 Refresh</button>
+              <button class="btn-secondary btn-sm" onclick="fetchActivityLog()">🔄 Refresh</button>
             </div>
 
-            <div id="todayLogList" class="log-list">
-              <div class="empty-state">
-                <p>Click Refresh to view today's log</p>
-              </div>
+            <div class="log-filter-bar">
+              <input type="text" id="logSearch" placeholder="Filter by person..." class="text-input text-input-sm" onkeyup="fetchActivityLog()">
+              <input type="date" id="logDate" class="text-input text-input-sm" onchange="fetchActivityLog()">
+            </div>
+
+            <div class="log-table-wrapper">
+              <table class="log-table">
+                <thead>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>Person</th>
+                    <th>Confidence</th>
+                    <th>Distance</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="activityLogBody">
+                  <tr>
+                    <td colspan="5" class="empty-cell">Click Refresh to load log records</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </section>
         </div>
@@ -266,7 +306,7 @@
         <button class="modal-close" onclick="toggleAdminModal()">&times;</button>
       </div>
       <div class="modal-body">
-        <p>Enter your <strong>ADMIN_TOKEN</strong> below. This token allows enrolling new faces and removing records.</p>
+        <p>Enter your <strong>ADMIN_TOKEN</strong> below. Required for face enrollment and roster management.</p>
         <div class="form-group" style="margin-top: 1rem;">
           <label for="modalAdminToken">Admin Token</label>
           <input type="password" id="modalAdminToken" class="text-input" placeholder="Enter ADMIN_TOKEN (default: admin123)">

@@ -70,18 +70,25 @@ class FaceRecognizer:
 
             name = "Unknown"
             employee_id = None
+            dist_val = None
+            conf_val = None
 
             if self.known_encodings:
                 distances = face_recognition.face_distance(self.known_encodings, face_encoding)
                 best_idx = int(np.argmin(distances))
-                if distances[best_idx] <= MATCH_TOLERANCE:
+                min_dist = float(distances[best_idx])
+                if min_dist <= MATCH_TOLERANCE:
                     name = self.known_names[best_idx]
                     employee_id = self.known_ids[best_idx]
+                    dist_val = round(min_dist, 4)
+                    conf_val = round((1.0 - min_dist) * 100, 1)
 
             matches.append({
                 "name": name,
                 "employee_id": employee_id,
                 "box": box,
+                "distance": dist_val,
+                "confidence": conf_val,
             })
 
         return {"width": w, "height": h, "matches": matches}
@@ -103,8 +110,11 @@ class FaceRecognizer:
             color = (0, 220, 180) if m["employee_id"] is not None else (0, 60, 240)
             cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
             cv2.rectangle(frame, (left, max(0, top - 24)), (right, top), color, cv2.FILLED)
+            lbl = m["name"]
+            if m.get("confidence") is not None:
+                lbl += f" ({m['confidence']}%)"
             cv2.putText(
-                frame, m["name"], (left + 6, max(16, top - 6)),
+                frame, lbl, (left + 6, max(16, top - 6)),
                 cv2.FONT_HERSHEY_DUPLEX, 0.55, (255, 255, 255), 1,
             )
         return frame
@@ -147,6 +157,29 @@ def compute_encoding_and_box(frame_bgr):
     return encodings[0], boxes[0], len(boxes)
 
 
+def compute_averaged_encoding_from_images(image_base64_list):
+    """
+    Decodes multiple base64 images, extracts 128-d face encodings using face_recognition,
+    and returns the numpy mean vector across all valid encodings.
+    """
+    valid_encodings = []
+    for b64 in image_base64_list:
+        try:
+            frame_bgr = decode_base64_image(b64)
+            enc = compute_encoding_from_bgr(frame_bgr)
+            if enc is not None:
+                valid_encodings.append(enc)
+        except Exception:
+            continue
+
+    if not valid_encodings:
+        return None, 0
+
+    averaged = np.mean(valid_encodings, axis=0)
+    return averaged, len(valid_encodings)
+
+
 def compute_encoding_from_frame(frame_bgr):
     return compute_encoding_from_bgr(frame_bgr)
+
 
