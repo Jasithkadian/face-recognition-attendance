@@ -27,75 +27,82 @@ DB_PATH = os.path.join(DATA_DIR, "office.db")
 def get_connection():
     """Get a database connection, creating the data directory if needed."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, timeout=20.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 20000")
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
 def init_db():
     """Initialize the database tables if they don't exist and run schema migrations."""
     conn = get_connection()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS employees (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            encoding BLOB NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS employees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                encoding BLOB NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS presence_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id INTEGER NOT NULL,
-            seen_at TEXT NOT NULL,
-            distance REAL,
-            FOREIGN KEY (employee_id) REFERENCES employees (id)
-        )
-    """)
-    conn.commit()
-
-    # DB Schema Migration: Ensure 'distance' column exists in presence_log table
-    cur.execute("PRAGMA table_info(presence_log)")
-    columns = [row["name"] for row in cur.fetchall()]
-    if "distance" not in columns:
-        cur.execute("ALTER TABLE presence_log ADD COLUMN distance REAL")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS presence_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                seen_at TEXT NOT NULL,
+                distance REAL,
+                FOREIGN KEY (employee_id) REFERENCES employees (id)
+            )
+        """)
         conn.commit()
 
-    conn.close()
+        # DB Schema Migration: Ensure 'distance' column exists in presence_log table
+        cur.execute("PRAGMA table_info(presence_log)")
+        columns = [row["name"] for row in cur.fetchall()]
+        if "distance" not in columns:
+            cur.execute("ALTER TABLE presence_log ADD COLUMN distance REAL")
+            conn.commit()
+    finally:
+        conn.close()
 
 
 def add_employee(name: str, encoding) -> int:
     """Store a new employee with their averaged face encoding."""
     conn = get_connection()
-    cur = conn.cursor()
-    # Ensure encoding is a float64 numpy array normalized to unit length
-    enc_arr = np.array(encoding, dtype=np.float64)
-    norm = np.linalg.norm(enc_arr)
-    if norm > 0:
-        enc_arr = enc_arr / norm
-    blob = pickle.dumps(enc_arr)
-    cur.execute(
-        "INSERT INTO employees (name, encoding, created_at) VALUES (?, ?, ?)",
-        (name, blob, datetime.datetime.now().isoformat()),
-    )
-    conn.commit()
-    employee_id = cur.lastrowid
-    conn.close()
-    return employee_id
+    try:
+        cur = conn.cursor()
+        # Ensure encoding is a float64 numpy array normalized to unit length
+        enc_arr = np.array(encoding, dtype=np.float64)
+        norm = np.linalg.norm(enc_arr)
+        if norm > 0:
+            enc_arr = enc_arr / norm
+        blob = pickle.dumps(enc_arr)
+        cur.execute(
+            "INSERT INTO employees (name, encoding, created_at) VALUES (?, ?, ?)",
+            (name, blob, datetime.datetime.now().isoformat()),
+        )
+        conn.commit()
+        employee_id = cur.lastrowid
+        return employee_id
+    finally:
+        conn.close()
 
 
 def delete_employee(employee_id: int):
     """Remove an employee and all their presence records."""
     conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
-    cur.execute("DELETE FROM presence_log WHERE employee_id = ?", (employee_id,))
-    conn.commit()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
+        cur.execute("DELETE FROM presence_log WHERE employee_id = ?", (employee_id,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_all_employees():

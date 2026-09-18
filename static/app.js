@@ -17,6 +17,8 @@ let isEnrolling = false;
 let enrollmentSamples = [];
 let currentPoseIndex = 0;
 let enrollmentTimer = null;
+let enrollmentResetTimer = null;
+let isProcessingEnrollmentTick = false;
 
 // Admin token saved in browser localStorage
 let adminToken = localStorage.getItem('adminToken') || '';
@@ -392,6 +394,18 @@ async function startGuidedEnrollment() {
     return;
   }
 
+  // Clear any delayed reset timer from a previous enrollment immediately
+  if (enrollmentResetTimer) {
+    clearTimeout(enrollmentResetTimer);
+    enrollmentResetTimer = null;
+  }
+
+  // Clear existing capture loop if any
+  if (enrollmentTimer) {
+    clearInterval(enrollmentTimer);
+    enrollmentTimer = null;
+  }
+
   // Auto-activate camera if not already started
   if (!stream) {
     showFeedback(feedback, 'info', 'Activating camera for face enrollment...');
@@ -405,8 +419,9 @@ async function startGuidedEnrollment() {
     }
   }
 
-  // Reset State
+  // Reset State completely for a fresh enrollment session
   isEnrolling = true;
+  isProcessingEnrollmentTick = false;
   enrollmentSamples = [];
   currentPoseIndex = 0;
 
@@ -417,34 +432,54 @@ async function startGuidedEnrollment() {
   hideFeedback(feedback);
 
   console.log('[Enrollment] Starting 15-sample guided capture loop...');
-  if (enrollmentTimer) clearInterval(enrollmentTimer);
   enrollmentTimer = setInterval(processEnrollmentTick, 700);
 }
 
 function updateEnrollmentUI() {
-  if (currentPoseIndex >= ENROLL_POSES.length) return;
+  const count = Math.min(enrollmentSamples.length, 15);
+  const pct = Math.min(100, Math.round((count / 15) * 100));
 
-  const currentPose = ENROLL_POSES[currentPoseIndex];
-  const poseIconEl = document.getElementById('poseIcon');
-  if (poseIconEl) poseIconEl.textContent = currentPose.icon;
-  if (poseTitle) poseTitle.textContent = `${currentPose.title} (Sample ${currentPoseIndex + 1} of 15)`;
-  if (poseInstruction) poseInstruction.textContent = currentPose.prompt;
+  if (currentPoseIndex < ENROLL_POSES.length) {
+    const currentPose = ENROLL_POSES[currentPoseIndex];
+    const poseIconEl = document.getElementById('poseIcon');
+    if (poseIconEl) poseIconEl.textContent = currentPose.icon;
+    if (poseTitle) poseTitle.textContent = `${currentPose.title} (Sample ${Math.min(count + 1, 15)} of 15)`;
+    if (poseInstruction) poseInstruction.textContent = currentPose.prompt;
+  }
 
-  const count = enrollmentSamples.length;
-  const pct = Math.round((count / 15) * 100);
   if (sampleCounter) sampleCounter.textContent = `Sample ${count} of 15`;
   if (enrollPercent) enrollPercent.textContent = `${pct}%`;
   if (enrollProgressBar) enrollProgressBar.style.width = `${pct}%`;
 }
 
 async function processEnrollmentTick() {
-  if (!isEnrolling || enrollmentSamples.length >= 15) return;
+  // HARD GUARD 1: Immediately return and clear interval if enrollment stopped or >= 15 samples reached
+  if (!isEnrolling || enrollmentSamples.length >= 15) {
+    if (enrollmentTimer) {
+      clearInterval(enrollmentTimer);
+      enrollmentTimer = null;
+    }
+    return;
+  }
+
+  // MUTEX GUARD: Prevent concurrent inflight network calls from overlapping
+  if (isProcessingEnrollmentTick) return;
+  isProcessingEnrollmentTick = true;
 
   const feedback = document.getElementById('enrollFeedback');
 
   try {
     const captureCanvas = captureFrameCanvas(360);
     const base64Image = captureCanvas.toDataURL('image/jpeg', 0.85);
+
+    // Re-check guard before making fetch
+    if (!isEnrolling || enrollmentSamples.length >= 15) {
+      if (enrollmentTimer) {
+        clearInterval(enrollmentTimer);
+        enrollmentTimer = null;
+      }
+      return;
+    }
 
     console.log(`[Enrollment] Probing sample ${enrollmentSamples.length + 1} of 15...`);
 
@@ -457,6 +492,15 @@ async function processEnrollmentTick() {
         existing_images: enrollmentSamples
       })
     });
+
+    // HARD GUARD 2: Check again after network response in case state changed
+    if (!isEnrolling || enrollmentSamples.length >= 15) {
+      if (enrollmentTimer) {
+        clearInterval(enrollmentTimer);
+        enrollmentTimer = null;
+      }
+      return;
+    }
 
     if (resp.ok) {
       const data = await resp.json();
@@ -476,8 +520,13 @@ async function processEnrollmentTick() {
         currentPoseIndex = Math.min(14, enrollmentSamples.length);
         updateEnrollmentUI();
 
-        if (enrollmentSamples.length === 15) {
+        // If 15 samples reached, immediately halt interval and finalize
+        if (enrollmentSamples.length >= 15) {
           console.log('[Enrollment] All 15 samples collected. Finalizing enrollment...');
+          if (enrollmentTimer) {
+            clearInterval(enrollmentTimer);
+            enrollmentTimer = null;
+          }
           finishGuidedEnrollment();
         }
       } else {
@@ -491,16 +540,26 @@ async function processEnrollmentTick() {
     }
   } catch (err) {
     console.warn('Enrollment tick error:', err);
+  } finally {
+    isProcessingEnrollmentTick = false;
   }
 }
 
 async function finishGuidedEnrollment() {
-  if (enrollmentTimer) clearInterval(enrollmentTimer);
-  enrollmentTimer = null;
+  // Immediately halt interval and disarm capture
+  if (enrollmentTimer) {
+    clearInterval(enrollmentTimer);
+    enrollmentTimer = null;
+  }
+  isEnrolling = false;
+  isProcessingEnrollmentTick = false;
 
   const nameInput = document.getElementById('employeeName');
   const feedback = document.getElementById('enrollFeedback');
   const name = nameInput.value.trim();
+
+  // Guarantee strictly at most 15 samples are sent to the backend
+  const samplesToSend = enrollmentSamples.slice(0, 15);
 
   if (poseTitle) poseTitle.textContent = "Processing Encodings...";
   if (poseInstruction) poseInstruction.textContent = "Averaging 15 128-d encodings and saving employee profile...";
@@ -512,42 +571,67 @@ async function finishGuidedEnrollment() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: name,
-        images: enrollmentSamples,
+        images: samplesToSend,
         admin_token: adminToken
       })
     });
 
-    const data = await resp.json();
+    let data;
+    try {
+      data = await resp.json();
+    } catch {
+      data = { detail: `Server responded with HTTP ${resp.status}: ${resp.statusText || 'Internal Server Error'}` };
+    }
 
     if (resp.ok) {
       showFeedback(feedback, 'success', `✓ Successfully enrolled ${name} using 15 real ML face samples!`);
       nameInput.value = '';
       fetchRosterList();
       fetchPresentList();
-      setTimeout(() => resetEnrollmentUI(), 2500);
+
+      if (enrollmentResetTimer) clearTimeout(enrollmentResetTimer);
+      enrollmentResetTimer = setTimeout(() => resetEnrollmentUI(), 2500);
     } else {
-      showFeedback(feedback, 'error', data.detail || 'Enrollment failed.');
+      showFeedback(feedback, 'error', data.detail || `Enrollment failed with HTTP ${resp.status}.`);
       cancelGuidedEnrollment();
     }
   } catch (err) {
-    showFeedback(feedback, 'error', 'Server error during enrollment processing.');
+    console.error('[Enrollment] Exception in finishGuidedEnrollment:', err);
+    showFeedback(feedback, 'error', `Enrollment request failed: ${err.message || 'Connection lost'}`);
     cancelGuidedEnrollment();
   }
 }
 
 function cancelGuidedEnrollment() {
-  if (enrollmentTimer) clearInterval(enrollmentTimer);
-  enrollmentTimer = null;
+  if (enrollmentResetTimer) {
+    clearTimeout(enrollmentResetTimer);
+    enrollmentResetTimer = null;
+  }
+  if (enrollmentTimer) {
+    clearInterval(enrollmentTimer);
+    enrollmentTimer = null;
+  }
   isEnrolling = false;
+  isProcessingEnrollmentTick = false;
   enrollmentSamples = [];
   currentPoseIndex = 0;
   resetEnrollmentUI();
 }
 
 function resetEnrollmentUI() {
+  if (enrollmentResetTimer) {
+    clearTimeout(enrollmentResetTimer);
+    enrollmentResetTimer = null;
+  }
+  if (enrollmentTimer) {
+    clearInterval(enrollmentTimer);
+    enrollmentTimer = null;
+  }
   isEnrolling = false;
+  isProcessingEnrollmentTick = false;
   enrollmentSamples = [];
   currentPoseIndex = 0;
+
   const poseIconEl = document.getElementById('poseIcon');
   if (poseIconEl) poseIconEl.textContent = "👤";
   if (poseTitle) poseTitle.textContent = "Ready to Start";

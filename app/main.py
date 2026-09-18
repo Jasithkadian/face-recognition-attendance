@@ -9,12 +9,14 @@ import os
 import sys
 import datetime
 import time
+import sqlite3
+import traceback
 from pathlib import Path
 from typing import Optional, List
 
-from fastapi import FastAPI, HTTPException, Header, Depends, status
+from fastapi import FastAPI, HTTPException, Header, Depends, status, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -38,6 +40,15 @@ app = FastAPI(
     description="Live face recognition attendance web service",
     version="1.0.0",
 )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    err_tb = traceback.format_exc()
+    print(f"[Unhandled Server Error] {request.method} {request.url.path}: {err_tb}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Server error: {str(exc)}", "type": type(exc).__name__}
+    )
 
 # Enable CORS for web client access
 app.add_middleware(
@@ -232,17 +243,32 @@ def enroll_employee(req: EnrollRequest):
     try:
         emp_id = database.add_employee(clean_name, encoding)
         print(f"[Enroll DB SUCCESS] Saved employee '{clean_name}' with ID={emp_id} to database.")
+    except sqlite3.IntegrityError as e:
+        print(f"[Enroll DB INTEGRITY ERROR] Duplicate employee name '{clean_name}': {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Employee '{clean_name}' already exists in the database. Please choose a different name.",
+        )
+    except sqlite3.OperationalError as e:
+        print(f"[Enroll DB OPERATIONAL ERROR] Database error saving '{clean_name}': {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database write failed due to lock/concurrency: {str(e)}",
+        )
     except Exception as e:
         print(f"[Enroll DB ERROR] Failed to save '{clean_name}': {e}")
         raise HTTPException(
             status_code=400,
-            detail=f"Could not enroll user (name may already exist): {str(e)}",
+            detail=f"Could not enroll user: {str(e)}",
         )
 
-    # Refresh recognizer with the new employee encoding
-    if recognizer_instance:
-        recognizer_instance.refresh_known_faces()
-        print(f"[Enroll RECOGNIZER SUCCESS] Refreshed recognizer with new employee '{clean_name}'.")
+    # Refresh recognizer with the new employee encoding (non-fatal if reload fails)
+    try:
+        if recognizer_instance:
+            recognizer_instance.refresh_known_faces()
+            print(f"[Enroll RECOGNIZER SUCCESS] Refreshed recognizer with new employee '{clean_name}'.")
+    except Exception as e:
+        print(f"[Enroll RECOGNIZER WARNING] Failed to refresh known faces cache for '{clean_name}': {e}")
 
     return {
         "status": "success",
