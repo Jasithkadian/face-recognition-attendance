@@ -181,9 +181,9 @@ async function startCamera() {
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
 
-    // Frame recognition tick loop (750ms for responsive face tracking during motion)
-    if (recognitionInterval) clearInterval(recognitionInterval);
-    recognitionInterval = setInterval(captureAndRecognizeFrame, 750);
+    // Real-time recognition loop (non-blocking, self-scheduling at ~10-15 FPS)
+    recognitionLoopActive = true;
+    runRecognitionLoop();
 
   } catch (err) {
     console.error('Camera access error:', err);
@@ -192,14 +192,10 @@ async function startCamera() {
 }
 
 function stopCamera() {
+  recognitionLoopActive = false;
   if (stream) {
     stream.getTracks().forEach(track => track.stop());
     stream = null;
-  }
-
-  if (recognitionInterval) {
-    clearInterval(recognitionInterval);
-    recognitionInterval = null;
   }
 
   if (isEnrolling) {
@@ -234,7 +230,7 @@ function resizeCanvas() {
 }
 
 // Helper to capture a downscaled frame canvas element
-function captureFrameCanvas(maxWidth = 400) {
+function captureFrameCanvas(maxWidth = 360) {
   const srcWidth = webcam.videoWidth || 640;
   const srcHeight = webcam.videoHeight || 480;
 
@@ -253,7 +249,22 @@ function captureFrameCanvas(maxWidth = 400) {
   return captureCanvas;
 }
 
-// ---------------- Real ML Frame Recognition ----------------
+// ---------------- Real-Time ML Frame Recognition Loop ----------------
+
+let recognitionLoopActive = false;
+
+async function runRecognitionLoop() {
+  if (!recognitionLoopActive || !stream || isEnrolling) return;
+
+  if (!webcam.paused && !webcam.ended && webcam.videoWidth) {
+    await captureAndRecognizeFrame();
+  }
+
+  if (recognitionLoopActive) {
+    // 60ms delay after response completion yields a smooth 10-15 FPS real-time tracking stream
+    setTimeout(runRecognitionLoop, 60);
+  }
+}
 
 async function captureAndRecognizeFrame() {
   if (!stream || isProcessingFrame || webcam.paused || webcam.ended || isEnrolling) return;
@@ -261,8 +272,8 @@ async function captureAndRecognizeFrame() {
   isProcessingFrame = true;
 
   try {
-    const captureCanvas = captureFrameCanvas(400);
-    const base64Image = captureCanvas.toDataURL('image/jpeg', 0.7);
+    const captureCanvas = captureFrameCanvas(360);
+    const base64Image = captureCanvas.toDataURL('image/jpeg', 0.65);
 
     const resp = await fetch('/api/recognize', {
       method: 'POST',

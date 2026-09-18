@@ -8,6 +8,7 @@ health checks (for Render keep-alive pings), and static frontend serving.
 import os
 import sys
 import datetime
+import time
 from pathlib import Path
 from typing import Optional, List
 
@@ -50,13 +51,24 @@ app.add_middleware(
 # Global face recognizer instance
 recognizer_instance: Optional[FaceRecognizer] = None
 
+# In-memory throttles to prevent synchronous SQLite lock contention on high-frequency frame streams
+_last_logged_presence = {}  # employee_id -> epoch timestamp
+_presence_cache = []
+_presence_cache_time = 0.0
+
 
 @app.on_event("startup")
 def startup_event():
-    global recognizer_instance
-    database.init_db()
-    recognizer_instance = FaceRecognizer()
+    get_recognizer()
     print("Database initialized and face recognizer loaded successfully.")
+
+
+def get_recognizer() -> FaceRecognizer:
+    global recognizer_instance
+    if recognizer_instance is None:
+        database.init_db()
+        recognizer_instance = FaceRecognizer()
+    return recognizer_instance
 
 
 # Request models
@@ -116,30 +128,40 @@ def verify_token(req: VerifyTokenRequest):
 @app.post("/api/recognize")
 def recognize_frame(req: RecognizeRequest):
     """
-    Accepts a base64 camera frame, performs face detection + IoU tracking + recognition,
-    logs presence in DB for recognized individuals (max once per 30s), and returns tracked bounding boxes and names.
+    Accepts a base64 camera frame, performs fast face detection + IoU/centroid tracking + recognition,
+    logs presence in DB with in-memory throttling, and returns tracked bounding boxes and names.
     """
-    if recognizer_instance is None:
-        raise HTTPException(status_code=500, detail="Recognizer not initialized.")
+    recognizer = get_recognizer()
 
     try:
         frame_bgr = decode_base64_image(req.image)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {str(e)}")
 
-    result = recognizer_instance.process_bgr_frame(frame_bgr)
+    result = recognizer.process_bgr_frame(frame_bgr)
 
-    # Log presence for any recognized faces with distance score (keeps seen_at fresh, throttled to 30s session log)
+    # In-memory throttle: avoid executing synchronous SQLite transactions on every video frame
+    global _presence_cache, _presence_cache_time
+    now_ts = time.time()
     for m in result.get("matches", []):
-        if m.get("employee_id") is not None:
-            try:
-                database.log_presence(m["employee_id"], distance=m.get("distance"), min_interval_seconds=30)
-            except Exception as e:
-                print(f"Error logging presence: {e}")
+        emp_id = m.get("employee_id")
+        if emp_id is not None:
+            if now_ts - _last_logged_presence.get(emp_id, 0.0) >= 30.0:
+                _last_logged_presence[emp_id] = now_ts
+                try:
+                    database.log_presence(emp_id, distance=m.get("distance"), min_interval_seconds=30)
+                except Exception as e:
+                    print(f"Error logging presence: {e}")
 
-    # Return updated active presence list directly in frame recognition response for instant frontend sync
-    result["present"] = database.get_recently_present(window_seconds=20)
+    # Cache get_recently_present for 2.0s to avoid expensive DB queries on every video frame
+    if now_ts - _presence_cache_time >= 2.0:
+        try:
+            _presence_cache = database.get_recently_present(window_seconds=20)
+            _presence_cache_time = now_ts
+        except Exception as e:
+            print(f"Error refreshing presence cache: {e}")
 
+    result["present"] = _presence_cache
     return result
 
 
