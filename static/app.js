@@ -315,7 +315,10 @@ function drawOverlays(frameWidth, frameHeight, matches) {
     const w = (right - left) * scaleX;
     const h = (bottom - top) * scaleY;
 
-    const isRecognized = m.employee_id !== null;
+    const CONFIDENCE_FLOOR = 60.0;
+    const isRecognized = (m.employee_id !== null) && 
+                         (m.name && m.name !== 'Unknown') && 
+                         (m.confidence === undefined || m.confidence === null || m.confidence >= CONFIDENCE_FLOOR);
     const strokeColor = isRecognized ? '#2563eb' : '#dc2626';
     const fillColor = isRecognized ? 'rgba(37, 99, 235, 0.08)' : 'rgba(220, 38, 38, 0.08)';
 
@@ -328,7 +331,7 @@ function drawOverlays(frameWidth, frameHeight, matches) {
     ctx.lineWidth = 2.5;
     drawRoundedRect(ctx, x, y, w, h, 8, false, true);
 
-    // Label formatting: Name + Confidence Score (e.g. "Jane Doe • 92.4%")
+    // Label formatting: Name + Confidence Score (or "Unknown" with red tag)
     let labelText = isRecognized ? m.name : 'Unknown';
     if (isRecognized && m.confidence !== undefined && m.confidence !== null) {
       labelText += ` • ${m.confidence}%`;

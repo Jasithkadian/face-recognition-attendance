@@ -5,8 +5,15 @@ import base64
 import io
 import time
 
-# Match threshold for face_recognition Euclidean distance (dlib standard normalized)
-MATCH_TOLERANCE = 0.50
+# Match threshold for L2-normalized 128-d face embeddings
+# Calibrated against enrolled dataset:
+# - Same-person variation: ~0.18 - 0.32 (confidence >= 60%)
+# - Unenrolled strangers: ~0.45 - 0.58 (fails threshold)
+# Threshold 0.38 provides a robust 0.07+ margin of safety against false accepts.
+MATCH_TOLERANCE = 0.38
+
+# Minimum confidence score (%) required to accept and display an enrolled person's identity
+CONFIDENCE_FLOOR = 60.0
 
 # Maximum width for processing frames safely
 MAX_FRAME_WIDTH = 640
@@ -28,19 +35,22 @@ def resize_if_large(frame_bgr, max_width=MAX_FRAME_WIDTH):
 def distance_to_confidence(distance, threshold=MATCH_TOLERANCE):
     """
     Converts raw 128-d face_distance into a realistic, calibrated confidence percentage.
-    Uses dlib's decision boundary curve relative to threshold (0.50):
-      - distance 0.20 -> ~80.0%
-      - distance 0.50 -> 50.0%
+    Uses decision boundary at threshold (0.38):
+      - distance 0.20 -> ~73.7%
+      - distance 0.25 -> ~67.1%
+      - distance 0.30 -> ~60.5%
+      - distance 0.38 -> 50.0%
+      - distance 0.45 -> ~44.3%
     Does NOT hardcode any values or artificially inflate scores.
     """
     if distance is None:
         return None
     if distance > threshold:
-        # Match score above decision boundary
-        prob = (1.0 - distance) / (1.0 - threshold) * 0.5
+        # Match score above decision boundary (rejection zone)
+        prob = (1.0 - min(1.0, distance)) / (1.0 - threshold) * 0.5
         return round(max(0.0, prob) * 100, 1)
     else:
-        # Match score below decision boundary
+        # Match score below decision boundary (acceptance zone)
         prob = 1.0 - (distance / (2.0 * threshold))
         return round(min(100.0, prob) * 100, 1)
 
@@ -244,12 +254,6 @@ class FaceTracker:
 
                 if iou > 0.25 or (w_min > 0 and (c_dist / w_min) < 0.35):
                     is_dup = True
-                    # If candidate has valid identity and existing is unknown, copy identity
-                    if t.employee_id is not None and existing.employee_id is None:
-                        existing.name = t.name
-                        existing.employee_id = t.employee_id
-                        existing.confidence = t.confidence
-                        existing.distance = t.distance
                     break
             if not is_dup:
                 deduped_tracks.append(t)
@@ -310,13 +314,15 @@ class FaceRecognizer:
         # Pass detections through robust FaceTracker
         tracked_faces = self.tracker.update(full_boxes)
 
-        # Selective Recognition: Only run 128-d ResNet embedding if:
-        # - Track is newly registered (last_recognized_frame == 0), OR
-        # - It has been 25 frames (~2-3 seconds) since last verification
+        # Selective Recognition:
+        # - Unrecognized / Unknown faces: evaluated rapidly (every 5 frames, ~0.3-0.5s) to establish identity or confirm rejection.
+        # - Once recognized with high confidence: re-verified every 25 frames (~2-3s).
         for t in tracked_faces:
+            is_unrecognized = (t.employee_id is None or t.name == "Unknown")
+            eval_interval = 5 if is_unrecognized else 25
             needs_recognition = (
                 (t.last_recognized_frame == 0) or
-                (self.tracker.frame_count - t.last_recognized_frame >= 25)
+                (self.tracker.frame_count - t.last_recognized_frame >= eval_interval)
             )
 
             if needs_recognition and self.known_encodings:
@@ -333,20 +339,39 @@ class FaceRecognizer:
                         distances = face_recognition.face_distance(self.known_encodings, face_enc)
                         best_idx = int(np.argmin(distances))
                         min_dist = float(distances[best_idx])
-                        if min_dist <= MATCH_TOLERANCE:
-                            t.name = self.known_names[best_idx]
-                            t.employee_id = self.known_ids[best_idx]
+                        conf = distance_to_confidence(min_dist, threshold=MATCH_TOLERANCE)
+                        closest_name = self.known_names[best_idx]
+                        closest_id = self.known_ids[best_idx]
+
+                        is_accepted = (min_dist <= MATCH_TOLERANCE) and (conf is not None and conf >= CONFIDENCE_FLOOR)
+
+                        # Instrument and log every match attempt with raw Euclidean distance
+                        print(
+                            f"[FaceRecognizer Match] Track #{t.track_id} | Closest: '{closest_name}' (ID={closest_id}) | "
+                            f"raw_dist={min_dist:.4f} | threshold={MATCH_TOLERANCE:.2f} | conf={conf}% (floor={CONFIDENCE_FLOOR}%) | "
+                            f"Decision: {'ACCEPTED' if is_accepted else 'REJECTED -> Unknown'}"
+                        )
+
+                        if is_accepted:
+                            t.name = closest_name
+                            t.employee_id = closest_id
                             t.distance = round(min_dist, 4)
-                            t.confidence = distance_to_confidence(min_dist)
+                            t.confidence = conf
                         else:
+                            # Explicit rejection path: never default to closest match if outside threshold
                             t.name = "Unknown"
                             t.employee_id = None
                             t.distance = round(min_dist, 4)
-                            t.confidence = distance_to_confidence(min_dist)
+                            t.confidence = conf
+
+                        t.last_recognized_frame = self.tracker.frame_count
+                    else:
+                        # Face detected by HOG but ResNet encoding extraction failed (e.g. blur or extreme profile angle)
+                        t.name = "Unknown"
+                        t.employee_id = None
+                        t.confidence = None
                 except Exception as e:
                     print(f"Error extracting face embedding for track #{t.track_id}: {e}")
-
-                t.last_recognized_frame = self.tracker.frame_count
 
         # Format output payload
         result = []

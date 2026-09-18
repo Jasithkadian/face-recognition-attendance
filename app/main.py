@@ -156,7 +156,9 @@ def recognize_frame(req: RecognizeRequest):
     now_ts = time.time()
     for m in result.get("matches", []):
         emp_id = m.get("employee_id")
-        if emp_id is not None:
+        name = m.get("name")
+        conf = m.get("confidence")
+        if emp_id is not None and name != "Unknown" and (conf is None or conf >= 60.0):
             if now_ts - _last_logged_presence.get(emp_id, 0.0) >= 30.0:
                 _last_logged_presence[emp_id] = now_ts
                 try:
