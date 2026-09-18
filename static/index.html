@@ -45,6 +45,7 @@
           <span class="pulse-text" id="statusText">System Ready</span>
         </div>
         <button id="adminToggleBtn" class="btn-secondary btn-sm" onclick="toggleAdminModal()">
+          <span id="adminLockIcon">🔒</span>
           <span id="adminLockText">Admin Settings</span>
         </button>
       </div>
@@ -183,6 +184,7 @@
 
               <div id="guidedEnrollContainer" class="guided-enroll-box">
                 <div class="guided-header">
+                  <div class="pose-icon" id="poseIcon">👤</div>
                   <div class="pose-info">
                     <h4 id="poseTitle">Ready to Start</h4>
                     <p id="poseInstruction">Enter name and click "Start Registration".</p>

@@ -590,6 +590,18 @@ canvas#overlayCanvas {
   gap: 0.85rem;
 }
 
+.pose-icon {
+  font-size: 2rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-sm);
+  background: rgba(37, 99, 235, 0.08);
+}
+
 .pose-info h4 {
   font-size: 0.95rem;
   font-weight: 700;

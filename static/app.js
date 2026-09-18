@@ -388,13 +388,21 @@ async function startGuidedEnrollment() {
   }
 
   if (!adminToken) {
-    showFeedback(feedback, 'error', '🔒 Admin Token required to enroll personnel. Click "Admin Mode" in header to authenticate.');
+    showFeedback(feedback, 'error', '🔒 Admin Token required to enroll personnel. Click "Admin Settings" in header to authenticate.');
     return;
   }
 
+  // Auto-activate camera if not already started
   if (!stream) {
-    showFeedback(feedback, 'error', 'Camera must be active to capture face samples. Click "Start Camera" first.');
-    return;
+    showFeedback(feedback, 'info', 'Activating camera for face enrollment...');
+    try {
+      await startCamera();
+      // Brief pause to allow camera stream dimensions to settle
+      await new Promise(r => setTimeout(r, 500));
+    } catch (err) {
+      showFeedback(feedback, 'error', 'Could not start camera feed. Please allow camera permissions.');
+      return;
+    }
   }
 
   // Reset State
@@ -408,7 +416,7 @@ async function startGuidedEnrollment() {
   updateEnrollmentUI();
   hideFeedback(feedback);
 
-  // Start sample collection tick loop
+  console.log('[Enrollment] Starting 15-sample guided capture loop...');
   if (enrollmentTimer) clearInterval(enrollmentTimer);
   enrollmentTimer = setInterval(processEnrollmentTick, 700);
 }
@@ -417,15 +425,16 @@ function updateEnrollmentUI() {
   if (currentPoseIndex >= ENROLL_POSES.length) return;
 
   const currentPose = ENROLL_POSES[currentPoseIndex];
-  poseIcon.textContent = currentPose.icon;
-  poseTitle.textContent = `${currentPose.title} (Sample ${currentPoseIndex + 1} of 15)`;
-  poseInstruction.textContent = currentPose.prompt;
+  const poseIconEl = document.getElementById('poseIcon');
+  if (poseIconEl) poseIconEl.textContent = currentPose.icon;
+  if (poseTitle) poseTitle.textContent = `${currentPose.title} (Sample ${currentPoseIndex + 1} of 15)`;
+  if (poseInstruction) poseInstruction.textContent = currentPose.prompt;
 
   const count = enrollmentSamples.length;
   const pct = Math.round((count / 15) * 100);
-  sampleCounter.textContent = `Sample ${count} of 15`;
-  enrollPercent.textContent = `${pct}%`;
-  enrollProgressBar.style.width = `${pct}%`;
+  if (sampleCounter) sampleCounter.textContent = `Sample ${count} of 15`;
+  if (enrollPercent) enrollPercent.textContent = `${pct}%`;
+  if (enrollProgressBar) enrollProgressBar.style.width = `${pct}%`;
 }
 
 async function processEnrollmentTick() {
@@ -434,8 +443,10 @@ async function processEnrollmentTick() {
   const feedback = document.getElementById('enrollFeedback');
 
   try {
-    const captureCanvas = captureFrameCanvas(400);
+    const captureCanvas = captureFrameCanvas(360);
     const base64Image = captureCanvas.toDataURL('image/jpeg', 0.85);
+
+    console.log(`[Enrollment] Probing sample ${enrollmentSamples.length + 1} of 15...`);
 
     // ML Face Check call to backend: verify face detection and duplicate pose rejection
     const resp = await fetch('/api/enroll-check', {
@@ -453,6 +464,7 @@ async function processEnrollmentTick() {
         // Face verified by face_recognition.face_locations() on backend!
         const sampleIdx = enrollmentSamples.length;
         enrollmentSamples.push(base64Image);
+        console.log(`[Enrollment] Captured valid sample ${sampleIdx + 1}/15`);
 
         // Update Thumbnail slot
         const thumbSlot = document.getElementById(`thumb-${sampleIdx}`);
@@ -465,11 +477,17 @@ async function processEnrollmentTick() {
         updateEnrollmentUI();
 
         if (enrollmentSamples.length === 15) {
+          console.log('[Enrollment] All 15 samples collected. Finalizing enrollment...');
           finishGuidedEnrollment();
         }
       } else {
-        poseInstruction.textContent = `⚠️ ${data.reason || 'Position face clearly in frame'}`;
+        console.log('[Enrollment] Sample check failed:', data.reason);
+        if (poseInstruction) {
+          poseInstruction.textContent = `⚠️ ${data.reason || 'Position face clearly in frame'}`;
+        }
       }
+    } else {
+      console.error('[Enrollment] Server error on /api/enroll-check:', resp.status);
     }
   } catch (err) {
     console.warn('Enrollment tick error:', err);
@@ -484,8 +502,8 @@ async function finishGuidedEnrollment() {
   const feedback = document.getElementById('enrollFeedback');
   const name = nameInput.value.trim();
 
-  poseTitle.textContent = "Processing Encodings...";
-  poseInstruction.textContent = "Averaging 15 128-d encodings and saving employee profile...";
+  if (poseTitle) poseTitle.textContent = "Processing Encodings...";
+  if (poseInstruction) poseInstruction.textContent = "Averaging 15 128-d encodings and saving employee profile...";
   showFeedback(feedback, 'info', 'Submitting 15 samples for numpy mean encoding calculation...');
 
   try {
@@ -530,14 +548,15 @@ function resetEnrollmentUI() {
   isEnrolling = false;
   enrollmentSamples = [];
   currentPoseIndex = 0;
-  poseIcon.textContent = "👤";
-  poseTitle.textContent = "Ready to Start";
-  poseInstruction.textContent = "Enter name and click 'Start 15-Sample Guided Enrollment'.";
-  sampleCounter.textContent = "Sample 0 of 15";
-  enrollPercent.textContent = "0%";
-  enrollProgressBar.style.width = "0%";
-  enrollBtn.classList.remove('hidden');
-  cancelEnrollBtn.classList.add('hidden');
+  const poseIconEl = document.getElementById('poseIcon');
+  if (poseIconEl) poseIconEl.textContent = "👤";
+  if (poseTitle) poseTitle.textContent = "Ready to Start";
+  if (poseInstruction) poseInstruction.textContent = "Enter name and click 'Start Registration'.";
+  if (sampleCounter) sampleCounter.textContent = "Sample 0 of 15";
+  if (enrollPercent) enrollPercent.textContent = "0%";
+  if (enrollProgressBar) enrollProgressBar.style.width = "0%";
+  if (enrollBtn) enrollBtn.classList.remove('hidden');
+  if (cancelEnrollBtn) cancelEnrollBtn.classList.add('hidden');
   renderThumbnailSlots();
 }
 
@@ -712,21 +731,29 @@ function updateAdminUI() {
   const isUnlocked = adminToken.trim().length > 0;
 
   if (isUnlocked) {
-    enrollAdminBadge.textContent = '🔓 Admin Unlocked';
-    enrollAdminBadge.className = 'admin-badge unlocked';
-    enrollLockedView.classList.add('hidden');
-    enrollUnlockedView.classList.remove('hidden');
+    if (enrollAdminBadge) {
+      enrollAdminBadge.textContent = '🔓 Admin Unlocked';
+      enrollAdminBadge.className = 'admin-badge unlocked';
+    }
+    if (enrollLockedView) enrollLockedView.classList.add('hidden');
+    if (enrollUnlockedView) enrollUnlockedView.classList.remove('hidden');
 
-    document.getElementById('adminLockText').textContent = 'Admin Mode (Active)';
-    document.getElementById('adminLockIcon').textContent = '🔓';
+    const lockText = document.getElementById('adminLockText');
+    if (lockText) lockText.textContent = 'Admin Mode (Active)';
+    const lockIcon = document.getElementById('adminLockIcon');
+    if (lockIcon) lockIcon.textContent = '🔓';
   } else {
-    enrollAdminBadge.textContent = '🔒 Admin Gated';
-    enrollAdminBadge.className = 'admin-badge locked';
-    enrollLockedView.classList.remove('hidden');
-    enrollUnlockedView.classList.add('hidden');
+    if (enrollAdminBadge) {
+      enrollAdminBadge.textContent = '🔒 Admin Gated';
+      enrollAdminBadge.className = 'admin-badge locked';
+    }
+    if (enrollLockedView) enrollLockedView.classList.remove('hidden');
+    if (enrollUnlockedView) enrollUnlockedView.classList.add('hidden');
 
-    document.getElementById('adminLockText').textContent = 'Admin Settings';
-    document.getElementById('adminLockIcon').textContent = '🔒';
+    const lockText = document.getElementById('adminLockText');
+    if (lockText) lockText.textContent = 'Admin Settings';
+    const lockIcon = document.getElementById('adminLockIcon');
+    if (lockIcon) lockIcon.textContent = '🔒';
   }
 }
 

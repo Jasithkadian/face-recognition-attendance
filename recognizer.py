@@ -12,7 +12,7 @@ MATCH_TOLERANCE = 0.50
 MAX_FRAME_WIDTH = 640
 
 # Minimum Euclidean distance between new sample and existing samples for enrollment duplicate rejection
-DUPLICATE_ENCODING_THRESHOLD = 0.05
+DUPLICATE_ENCODING_THRESHOLD = 0.02
 
 
 def resize_if_large(frame_bgr, max_width=MAX_FRAME_WIDTH):
