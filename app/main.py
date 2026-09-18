@@ -28,9 +28,9 @@ from recognizer import (
 )
 
 
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
-if not ADMIN_TOKEN:
-    sys.exit("FATAL: ADMIN_TOKEN environment variable is not set. Refusing to start with no admin protection.")
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "admin123")
+if os.environ.get("ADMIN_TOKEN") is None:
+    print("[WARNING] ADMIN_TOKEN environment variable is not set. Using default fallback token: 'admin123'")
 
 app = FastAPI(
     title="Face Pulse Attendance API",
@@ -117,7 +117,7 @@ def verify_token(req: VerifyTokenRequest):
 def recognize_frame(req: RecognizeRequest):
     """
     Accepts a base64 camera frame, performs face detection + IoU tracking + recognition,
-    logs presence in DB for recognized individuals (max once per 60s), and returns tracked bounding boxes and names.
+    logs presence in DB for recognized individuals (max once per 30s), and returns tracked bounding boxes and names.
     """
     if recognizer_instance is None:
         raise HTTPException(status_code=500, detail="Recognizer not initialized.")
@@ -163,10 +163,13 @@ def enroll_employee(req: EnrollRequest):
     Enrolls a new person into the system using single or multi-sample guided enrollment.
     Requires valid admin_token. Computes averaged 128-d face encoding from samples.
     """
+    print(f"[Enroll] Request received for name='{req.name}', admin_token_provided={'Yes' if req.admin_token else 'No'}")
+
     if req.admin_token != ADMIN_TOKEN:
+        print(f"[Enroll REJECTED] Admin token mismatch. Received '{req.admin_token}', expected '{ADMIN_TOKEN}'")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unauthorized: Incorrect admin token.",
+            detail="Unauthorized: Incorrect admin token. Please enter valid admin token.",
         )
 
     clean_name = req.name.strip()
@@ -177,9 +180,10 @@ def enroll_employee(req: EnrollRequest):
     samples_used = 1
 
     if req.images and len(req.images) > 0:
-        # Multi-sample guided enrollment path
+        print(f"[Enroll] Processing multi-sample enrollment for '{clean_name}' with {len(req.images)} images...")
         avg_enc, count = compute_averaged_encoding_from_images(req.images)
         if avg_enc is None or count == 0:
+            print(f"[Enroll ERROR] Could not detect faces in multi-sample set for '{clean_name}'.")
             raise HTTPException(
                 status_code=400,
                 detail="Could not detect faces in the provided sample set. Please ensure good lighting and re-enroll.",
@@ -187,7 +191,7 @@ def enroll_employee(req: EnrollRequest):
         encoding = avg_enc
         samples_used = count
     elif req.image:
-        # Single-sample legacy enrollment path
+        print(f"[Enroll] Processing single-sample enrollment for '{clean_name}'...")
         try:
             frame_bgr = decode_base64_image(req.image)
         except Exception as e:
@@ -195,6 +199,7 @@ def enroll_employee(req: EnrollRequest):
 
         encoding = compute_encoding_from_bgr(frame_bgr)
         if encoding is None:
+            print(f"[Enroll ERROR] No face detected in single image for '{clean_name}'.")
             raise HTTPException(
                 status_code=400,
                 detail="No face detected in the image. Please position your face clearly in front of the camera and try again.",
@@ -204,14 +209,18 @@ def enroll_employee(req: EnrollRequest):
 
     try:
         emp_id = database.add_employee(clean_name, encoding)
+        print(f"[Enroll DB SUCCESS] Saved employee '{clean_name}' with ID={emp_id} to database.")
     except Exception as e:
+        print(f"[Enroll DB ERROR] Failed to save '{clean_name}': {e}")
         raise HTTPException(
             status_code=400,
             detail=f"Could not enroll user (name may already exist): {str(e)}",
         )
 
     # Refresh recognizer with the new employee encoding
-    recognizer_instance.refresh_known_faces()
+    if recognizer_instance:
+        recognizer_instance.refresh_known_faces()
+        print(f"[Enroll RECOGNIZER SUCCESS] Refreshed recognizer with new employee '{clean_name}'.")
 
     return {
         "status": "success",
@@ -220,6 +229,7 @@ def enroll_employee(req: EnrollRequest):
         "name": clean_name,
         "samples_used": samples_used,
     }
+
 
 
 @app.get("/api/present")

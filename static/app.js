@@ -376,6 +376,11 @@ async function startGuidedEnrollment() {
     return;
   }
 
+  if (!adminToken) {
+    showFeedback(feedback, 'error', '🔒 Admin Token required to enroll personnel. Click "Admin Mode" in header to authenticate.');
+    return;
+  }
+
   if (!stream) {
     showFeedback(feedback, 'error', 'Camera must be active to capture face samples. Click "Start Camera" first.');
     return;

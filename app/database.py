@@ -14,12 +14,16 @@ import pickle
 import datetime
 import os
 from pathlib import Path
+import numpy as np
+
+from recognizer import distance_to_confidence
+
 
 # Use DATA_DIR env var for persistent disk mount on Render, fallback to ./data
 DATA_DIR = os.environ.get("DATA_DIR", str(Path(__file__).parent.parent / "data"))
 DB_PATH = os.path.join(DATA_DIR, "office.db")
-
-
+ 
+ 
 def get_connection():
     """Get a database connection, creating the data directory if needed."""
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -68,7 +72,12 @@ def add_employee(name: str, encoding) -> int:
     """Store a new employee with their averaged face encoding."""
     conn = get_connection()
     cur = conn.cursor()
-    blob = pickle.dumps(encoding)
+    # Ensure encoding is a float64 numpy array normalized to unit length
+    enc_arr = np.array(encoding, dtype=np.float64)
+    norm = np.linalg.norm(enc_arr)
+    if norm > 0:
+        enc_arr = enc_arr / norm
+    blob = pickle.dumps(enc_arr)
     cur.execute(
         "INSERT INTO employees (name, encoding, created_at) VALUES (?, ?, ?)",
         (name, blob, datetime.datetime.now().isoformat()),
@@ -90,15 +99,24 @@ def delete_employee(employee_id: int):
 
 
 def get_all_employees():
-    """Returns list of dicts: id, name, encoding (decoded numpy array)."""
+    """Returns list of dicts: id, name, encoding (decoded numpy array, L2 normalized)."""
     conn = get_connection()
     cur = conn.cursor()
     rows = cur.execute("SELECT id, name, encoding FROM employees").fetchall()
     conn.close()
-    return [
-        {"id": r["id"], "name": r["name"], "encoding": pickle.loads(r["encoding"])}
-        for r in rows
-    ]
+    result = []
+    for r in rows:
+        try:
+            enc = pickle.loads(r["encoding"])
+            if isinstance(enc, np.ndarray) and enc.size == 128:
+                enc = enc.flatten().astype(np.float64)
+                norm = np.linalg.norm(enc)
+                if norm > 0:
+                    enc = enc / norm
+                result.append({"id": r["id"], "name": r["name"], "encoding": enc})
+        except Exception as e:
+            print(f"Error loading employee encoding id={r['id']}: {e}")
+    return result
 
 
 def get_all_people():
@@ -234,7 +252,7 @@ def get_today_summary():
 
 def get_activity_log(limit: int = 100, name_filter: str = None, date_filter: str = None):
     """
-    Get detailed timestamped activity log records with face match distance and confidence scores.
+    Get detailed timestamped activity log records with face match distance and confidence scores using canonical formula.
     """
     conn = get_connection()
     cur = conn.cursor()
@@ -264,7 +282,7 @@ def get_activity_log(limit: int = 100, name_filter: str = None, date_filter: str
     result = []
     for r in rows:
         dist = r["distance"]
-        conf = round((1.0 - dist) * 100, 1) if (dist is not None and dist <= 1.0) else None
+        conf = distance_to_confidence(dist) if dist is not None else None
         result.append({
             "id": r["id"],
             "name": r["name"],
@@ -273,4 +291,5 @@ def get_activity_log(limit: int = 100, name_filter: str = None, date_filter: str
             "confidence": conf,
         })
     return result
+
 

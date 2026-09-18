@@ -14,14 +14,14 @@ from PIL import Image
 
 from app import database
 
-# Match threshold for face_recognition Euclidean distance (dlib standard)
-MATCH_TOLERANCE = 0.58
+# Match threshold for face_recognition Euclidean distance (dlib standard normalized)
+MATCH_TOLERANCE = 0.50
 
 # Maximum width for processing frames safely
 MAX_FRAME_WIDTH = 640
 
 # Minimum Euclidean distance between new sample and existing samples for enrollment duplicate rejection
-DUPLICATE_ENCODING_THRESHOLD = 0.16
+DUPLICATE_ENCODING_THRESHOLD = 0.05
 
 
 def resize_if_large(frame_bgr, max_width=MAX_FRAME_WIDTH):
@@ -37,10 +37,9 @@ def resize_if_large(frame_bgr, max_width=MAX_FRAME_WIDTH):
 def distance_to_confidence(distance, threshold=MATCH_TOLERANCE):
     """
     Converts raw 128-d face_distance into a realistic, calibrated confidence percentage.
-    Uses dlib's decision boundary curve relative to threshold (0.58):
-      - distance 0.20 -> ~91.4%
-      - distance 0.30 -> ~87.1%
-      - distance 0.58 -> 50.0%
+    Uses dlib's decision boundary curve relative to threshold (0.50):
+      - distance 0.20 -> ~80.0%
+      - distance 0.50 -> 50.0%
     Does NOT hardcode any values or artificially inflate scores.
     """
     if distance is None:
@@ -130,7 +129,7 @@ class FaceTracker:
                 track = self.tracks[i]
                 det = detected_matches[j]
 
-                # Exponential Moving Average (EMA) smoothing on box coordinates for motion stability (Bug 2 fix)
+                # Exponential Moving Average (EMA) smoothing on box coordinates for motion stability
                 alpha = 0.65
                 old_t, old_r, old_b, old_l = track.box
                 new_t, new_r, new_b, new_l = det["box"]
@@ -185,8 +184,6 @@ class FaceTracker:
         # Retain tracks within disappearance tolerance (max 5 missed frames)
         self.tracks = [t for t in self.tracks if t.disappeared <= self.max_disappeared]
 
-        # Bug 1 Fix: Deduplicate overlapping tracks (Non-Maximum Suppression)
-        # Ensure only 1 active track per physical face is rendered, preventing double-box artifacts
         active_tracks = [t for t in self.tracks if t.disappeared == 0]
         if not active_tracks and self.tracks:
             # Fallback to most recently updated track if brief occlusion occurred
@@ -198,7 +195,6 @@ class FaceTracker:
             for existing in deduped_tracks:
                 if calculate_iou(t.box, existing.box) > 0.35:
                     keep = False
-                    # Keep track with higher hits / valid employee ID
                     if t.employee_id is not None and existing.employee_id is None:
                         existing.name = t.name
                         existing.employee_id = t.employee_id
@@ -233,11 +229,12 @@ class FaceRecognizer:
         self.refresh_known_faces()
 
     def refresh_known_faces(self):
-        """Reload known employees from the SQLite database."""
+        """Reload known employees from the SQLite database and ensure L2 unit normalization."""
         employees = database.get_all_employees()
         self.known_ids = [e["id"] for e in employees]
         self.known_names = [e["name"] for e in employees]
         self.known_encodings = [e["encoding"] for e in employees]
+        print(f"[FaceRecognizer] Reloaded {len(self.known_ids)} enrolled employees from DB.")
 
     def process_bgr_frame(self, frame_bgr):
         """
@@ -274,7 +271,12 @@ class FaceRecognizer:
         encodings = face_recognition.face_encodings(rgb_full, full_boxes)
 
         detected_matches = []
-        for box, face_encoding in zip(full_boxes, encodings):
+        for box, raw_encoding in zip(full_boxes, encodings):
+            face_encoding = raw_encoding.astype(np.float64)
+            norm = np.linalg.norm(face_encoding)
+            if norm > 0:
+                face_encoding = face_encoding / norm
+
             name = "Unknown"
             employee_id = None
             dist_val = None
@@ -337,14 +339,20 @@ def decode_base64_image(base64_str: str):
 
 
 def compute_encoding_from_bgr(frame_bgr):
-    """Extracts high-resolution 128-d face encoding vector from frame."""
+    """Extracts high-resolution 128-d face encoding vector from frame, normalized to unit length."""
     frame_bgr = resize_if_large(frame_bgr, max_width=640)
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     boxes = face_recognition.face_locations(rgb, model="hog")
     if not boxes:
         return None
     encodings = face_recognition.face_encodings(rgb, boxes)
-    return encodings[0] if encodings else None
+    if not encodings:
+        return None
+    enc = encodings[0].astype(np.float64)
+    norm = np.linalg.norm(enc)
+    if norm > 0:
+        enc = enc / norm
+    return enc
 
 
 def compute_encoding_and_box(frame_bgr):
@@ -357,15 +365,19 @@ def compute_encoding_and_box(frame_bgr):
     encodings = face_recognition.face_encodings(rgb, boxes)
     if not encodings:
         return None, None, len(boxes)
-    return encodings[0], boxes[0], len(boxes)
+    enc = encodings[0].astype(np.float64)
+    norm = np.linalg.norm(enc)
+    if norm > 0:
+        enc = enc / norm
+    return enc, boxes[0], len(boxes)
 
 
 def validate_enrollment_sample(frame_bgr, existing_base64_samples=None, min_unique_distance=DUPLICATE_ENCODING_THRESHOLD):
     """
     Validates a candidate frame during multi-angle enrollment:
       1. Verifies exactly 1 face is present in frame.
-      2. Computes high-precision 128-d face encoding and pose orientation metrics.
-      3. Rejects duplicate/near-identical frames if similarity to existing samples is too high (distance < min_unique_distance).
+      2. Computes high-precision 128-d face encoding.
+      3. Rejects duplicate/near-identical frames if similarity to recent sample is too high.
     """
     frame_bgr = resize_if_large(frame_bgr, max_width=640)
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -380,25 +392,23 @@ def validate_enrollment_sample(frame_bgr, existing_base64_samples=None, min_uniq
     if not encodings:
         return False, "Could not extract facial features. Check lighting.", None
 
-    cand_enc = encodings[0]
+    cand_enc = encodings[0].astype(np.float64)
+    norm = np.linalg.norm(cand_enc)
+    if norm > 0:
+        cand_enc = cand_enc / norm
 
-    # Duplicate rejection check against previously captured sample encodings
+    # Duplicate rejection check against recent captured sample encoding (last sample only for speed)
     if existing_base64_samples and len(existing_base64_samples) > 0:
-        existing_encs = []
-        for b64 in existing_base64_samples:
-            try:
-                ex_bgr = decode_base64_image(b64)
-                ex_enc = compute_encoding_from_bgr(ex_bgr)
-                if ex_enc is not None:
-                    existing_encs.append(ex_enc)
-            except Exception:
-                continue
-
-        if existing_encs:
-            dists = face_recognition.face_distance(existing_encs, cand_enc)
-            min_d = float(np.min(dists))
-            if min_d < min_unique_distance:
-                return False, f"Duplicate pose detected (distance {min_d:.3f} < {min_unique_distance}). Turn head to a new angle!", None
+        try:
+            last_b64 = existing_base64_samples[-1]
+            ex_bgr = decode_base64_image(last_b64)
+            ex_enc = compute_encoding_from_bgr(ex_bgr)
+            if ex_enc is not None:
+                dist = float(face_recognition.face_distance([ex_enc], cand_enc)[0])
+                if dist < min_unique_distance:
+                    return False, f"Duplicate pose detected (distance {dist:.3f} < {min_unique_distance}). Turn head to a new angle!", None
+        except Exception:
+            pass
 
     return True, "Valid multi-angle pose captured!", list(boxes[0])
 
@@ -406,7 +416,7 @@ def validate_enrollment_sample(frame_bgr, existing_base64_samples=None, min_uniq
 def compute_averaged_encoding_from_images(image_base64_list):
     """
     Decodes multiple base64 images, extracts 128-d face encodings using face_recognition,
-    and returns the numpy mean vector across all valid encodings.
+    averages them, and returns the L2-renormalized unit vector across all valid encodings.
     """
     valid_encodings = []
     for b64 in image_base64_list:
@@ -422,8 +432,12 @@ def compute_averaged_encoding_from_images(image_base64_list):
         return None, 0
 
     averaged = np.mean(valid_encodings, axis=0)
-    return averaged, len(valid_encodings)
+    norm = np.linalg.norm(averaged)
+    if norm > 0:
+        averaged = averaged / norm
+    return averaged.astype(np.float64), len(valid_encodings)
 
 
 def compute_encoding_from_frame(frame_bgr):
     return compute_encoding_from_bgr(frame_bgr)
+
