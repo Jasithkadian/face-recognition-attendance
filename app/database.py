@@ -72,7 +72,7 @@ def init_db():
 
 
 def add_employee(name: str, encoding) -> int:
-    """Store a new employee with their averaged face encoding."""
+    """Store or update an employee with their averaged face encoding."""
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -83,12 +83,19 @@ def add_employee(name: str, encoding) -> int:
             enc_arr = enc_arr / norm
         blob = pickle.dumps(enc_arr)
         cur.execute(
-            "INSERT INTO employees (name, encoding, created_at) VALUES (?, ?, ?)",
+            """
+            INSERT INTO employees (name, encoding, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                encoding = excluded.encoding,
+                created_at = excluded.created_at
+            """,
             (name, blob, datetime.datetime.now().isoformat()),
         )
         conn.commit()
-        employee_id = cur.lastrowid
-        return employee_id
+        cur.execute("SELECT id FROM employees WHERE name = ?", (name,))
+        row = cur.fetchone()
+        return row["id"] if row else cur.lastrowid
     finally:
         conn.close()
 
@@ -115,12 +122,12 @@ def get_all_employees():
     for r in rows:
         try:
             enc = pickle.loads(r["encoding"])
-            if isinstance(enc, np.ndarray) and enc.size == 128:
+            if isinstance(enc, np.ndarray) and enc.size in (128, 512):
                 enc = enc.flatten().astype(np.float64)
                 norm = np.linalg.norm(enc)
                 if norm > 0:
                     enc = enc / norm
-                result.append({"id": r["id"], "name": r["name"], "encoding": enc})
+                result.append({"id": r["id"], "name": r["name"], "encoding": enc, "dim": enc.size})
         except Exception as e:
             print(f"Error loading employee encoding id={r['id']}: {e}")
     return result

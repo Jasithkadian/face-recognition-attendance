@@ -1,7 +1,6 @@
 opencv-python-headless>=4.8.0.76
-dlib-bin
-face_recognition @ git+https://github.com/thetoby9944/face_recognition
-numpy
+onnxruntime>=1.16.0
+numpy>=1.24.0
 Pillow>=10.0.0
 fastapi>=0.100.0
 uvicorn[standard]>=0.22.0
