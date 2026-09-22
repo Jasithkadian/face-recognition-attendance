@@ -145,12 +145,183 @@ def calculate_match_score(boxA, boxB):
     return float(iou)
 
 
+class KalmanBoxFilter:
+    """
+    8-dimensional state vector [x, y, a, h, vx, vy, va, vh]
+    Tracks bounding box center (x, y), aspect ratio a (w/h), height h, and respective velocities.
+    Uses constant-velocity motion model with Wojke et al. covariance weights.
+    """
+    def __init__(self, box):
+        top, right, bottom, left = box
+        w = max(1.0, float(right - left))
+        h = max(1.0, float(bottom - top))
+        x = float(left) + w / 2.0
+        y = float(top) + h / 2.0
+        a = w / h
+
+        self._motion_mat = np.eye(8, 8, dtype=np.float32)
+        for i in range(4):
+            self._motion_mat[i, i + 4] = 1.0
+
+        self._update_mat = np.eye(4, 8, dtype=np.float32)
+        self._std_weight_position = 1.0 / 20.0
+        self._std_weight_velocity = 1.0 / 160.0
+
+        self.mean = np.zeros(8, dtype=np.float32)
+        self.mean[:4] = [x, y, a, h]
+
+        std = [
+            2 * self._std_weight_position * h,
+            2 * self._std_weight_position * h,
+            1e-2,
+            2 * self._std_weight_position * h,
+            10 * self._std_weight_velocity * h,
+            10 * self._std_weight_velocity * h,
+            1e-5,
+            10 * self._std_weight_velocity * h
+        ]
+        self.covariance = np.diag(np.square(std)).astype(np.float32)
+
+    def predict(self):
+        h = max(1.0, float(self.mean[3]))
+        std_pos = [
+            self._std_weight_position * h,
+            self._std_weight_position * h,
+            1e-2,
+            self._std_weight_position * h
+        ]
+        std_vel = [
+            self._std_weight_velocity * h,
+            self._std_weight_velocity * h,
+            1e-5,
+            self._std_weight_velocity * h
+        ]
+        motion_cov = np.diag(np.square(np.r_[std_pos, std_vel])).astype(np.float32)
+
+        self.mean = np.dot(self._motion_mat, self.mean)
+        self.covariance = np.linalg.multi_dot([self._motion_mat, self.covariance, self._motion_mat.T]) + motion_cov
+        return self.get_box()
+
+    def update(self, box):
+        top, right, bottom, left = box
+        w = max(1.0, float(right - left))
+        h = max(1.0, float(bottom - top))
+        x = float(left) + w / 2.0
+        y = float(top) + h / 2.0
+        a = w / h
+        measurement = np.array([x, y, a, h], dtype=np.float32)
+
+        std = [
+            self._std_weight_position * h,
+            self._std_weight_position * h,
+            1e-1,
+            self._std_weight_position * h
+        ]
+        measurement_cov = np.diag(np.square(std)).astype(np.float32)
+
+        projected_mean = np.dot(self._update_mat, self.mean)
+        projected_cov = np.linalg.multi_dot([self._update_mat, self.covariance, self._update_mat.T]) + measurement_cov
+
+        try:
+            S_chol = np.linalg.cholesky(projected_cov)
+            K = np.linalg.solve(S_chol.T, np.linalg.solve(S_chol, np.dot(self._update_mat, self.covariance))).T
+        except np.linalg.LinAlgError:
+            K = np.dot(self.covariance, np.dot(self._update_mat.T, np.linalg.inv(projected_cov)))
+
+        innovation = measurement - projected_mean
+        self.mean = self.mean + np.dot(innovation, K.T)
+        self.covariance = self.covariance - np.linalg.multi_dot([K, projected_cov, K.T])
+        return self.get_box()
+
+    def get_box(self):
+        x, y, a, h = self.mean[:4]
+        w = max(1.0, float(a * h))
+        h = max(1.0, float(h))
+        left = int(round(x - w / 2.0))
+        top = int(round(y - h / 2.0))
+        right = int(round(left + w))
+        bottom = int(round(top + h))
+        return [top, right, bottom, left]
+
+
+def iou_cost_matrix(tracks, detections):
+    """
+    Computes NxM association cost matrix: 1.0 - IoU.
+    For non-overlapping boxes (IoU == 0), adds normalized centroid distance penalty
+    to preserve matching on rapid movements across frames.
+    """
+    N = len(tracks)
+    M = len(detections)
+    cost = np.zeros((N, M), dtype=np.float32)
+
+    for i, track in enumerate(tracks):
+        t1, r1, b1, l1 = track.box
+        c1_y, c1_x = (t1 + b1) * 0.5, (l1 + r1) * 0.5
+        w1, h1 = max(1.0, r1 - l1), max(1.0, b1 - t1)
+        diag1 = max(1.0, np.hypot(w1, h1))
+
+        for j, det in enumerate(detections):
+            t2, r2, b2, l2 = det["box"]
+            iou = calculate_iou(track.box, det["box"])
+            if iou > 0:
+                cost[i, j] = 1.0 - iou
+            else:
+                c2_y, c2_x = (t2 + b2) * 0.5, (l2 + r2) * 0.5
+                c_dist = np.hypot(c1_x - c2_x, c1_y - c2_y)
+                norm_dist = min(1.0, c_dist / diag1)
+                cost[i, j] = 1.0 + norm_dist
+    return cost
+
+
+def linear_assignment(cost_matrix, max_cost):
+    """
+    Bipartite linear assignment matching on cost_matrix up to max_cost.
+    Uses scipy.optimize.linear_sum_assignment if present, falls back to greedy matching.
+    """
+    if cost_matrix.size == 0:
+        return [], list(range(cost_matrix.shape[0])), list(range(cost_matrix.shape[1]))
+
+    try:
+        from scipy.optimize import linear_sum_assignment
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    except ImportError:
+        cost_copy = cost_matrix.copy()
+        pairs = []
+        while True:
+            min_val = np.min(cost_copy)
+            if min_val > max_cost:
+                break
+            r, c = np.unravel_index(np.argmin(cost_copy), cost_copy.shape)
+            if cost_copy[r, c] == np.inf:
+                break
+            pairs.append((r, c))
+            cost_copy[r, :] = np.inf
+            cost_copy[:, c] = np.inf
+        row_ind = [p[0] for p in pairs]
+        col_ind = [p[1] for p in pairs]
+
+    matches = []
+    unmatched_rows = set(range(cost_matrix.shape[0]))
+    unmatched_cols = set(range(cost_matrix.shape[1]))
+
+    for r, c in zip(row_ind, col_ind):
+        if cost_matrix[r, c] <= max_cost:
+            matches.append((int(r), int(c)))
+            unmatched_rows.discard(int(r))
+            unmatched_cols.discard(int(c))
+
+    return matches, list(unmatched_rows), list(unmatched_cols)
+
+
 class Track:
-    """Persistent face track maintaining smoothed bounding box and identity across frames."""
+    """
+    Persistent face track with Kalman-filtered motion prediction and identity persistence.
+    """
     def __init__(self, track_id, box, name="Unknown", employee_id=None, confidence=None, distance=None, landmarks=None):
         self.track_id = track_id
-        self.smooth_box = [float(x) for x in box]
-        self.box = [int(round(x)) for x in self.smooth_box]
+        self.kalman_filter = KalmanBoxFilter(box)
+        self.box = [int(round(x)) for x in box]
+        self.smooth_box = list(self.box)
         self.landmarks = landmarks
         self.name = name
         self.employee_id = employee_id
@@ -161,120 +332,124 @@ class Track:
         self.last_seen = time.time()
         self.last_recognized_frame = 0
 
+    def predict(self):
+        self.box = self.kalman_filter.predict()
+        self.smooth_box = list(self.box)
+        return self.box
+
     def update_box(self, new_box, landmarks=None):
-        new_t, new_r, new_b, new_l = [float(x) for x in new_box]
-        old_t, old_r, old_b, old_l = self.smooth_box
-
-        max_delta = max(
-            abs(new_t - old_t),
-            abs(new_r - old_r),
-            abs(new_b - old_b),
-            abs(new_l - old_l),
-        )
-
-        if max_delta < 2.5:
-            alpha = 0.10
-        elif max_delta < 15.0:
-            alpha = 0.55
-        else:
-            alpha = 0.80
-
-        self.smooth_box = [
-            alpha * new_t + (1.0 - alpha) * old_t,
-            alpha * new_r + (1.0 - alpha) * old_r,
-            alpha * new_b + (1.0 - alpha) * old_b,
-            alpha * new_l + (1.0 - alpha) * old_l,
-        ]
-        self.box = [int(round(x)) for x in self.smooth_box]
+        self.box = self.kalman_filter.update(new_box)
+        self.smooth_box = list(self.box)
         if landmarks:
             self.landmarks = landmarks
         self.disappeared = 0
         self.hits += 1
         self.last_seen = time.time()
 
+    def mark_missed(self):
+        self.disappeared += 1
 
-class FaceTracker:
-    """Robust hybrid IoU + Centroid multi-face tracker."""
-    def __init__(self, max_disappeared=5, match_score_threshold=0.20):
+
+class ByteTrack:
+    """
+    Industrial Two-Stage ByteTrack with 8-State Kalman Motion Filter.
+    Features:
+    - Stage 1: High-confidence detection matching (D_high) via IoU distance.
+    - Stage 2: Low-confidence detection recovery (D_low) to maintain tracks through motion blur/turning.
+    - Kalman filter velocity projection: eliminates bounding box lag during rapid face movement.
+    - Coasting: retains and smoothly projects tracks through brief camera occlusions.
+    """
+    def __init__(self, track_high_thresh=0.40, track_low_thresh=0.15, match_thresh=0.75, match_low_thresh=0.55, max_disappeared=10):
         self.next_track_id = 101
         self.tracks = []
+        self.track_high_thresh = track_high_thresh
+        self.track_low_thresh = track_low_thresh
+        self.match_thresh = match_thresh
+        self.match_low_thresh = match_low_thresh
         self.max_disappeared = max_disappeared
-        self.match_score_threshold = match_score_threshold
         self.frame_count = 0
 
     def update(self, detections):
-        """
-        Updates persistent tracks from raw detections.
-        detections: list of dicts with 'box' [top, right, bottom, left] and optional 'landmarks'.
-        """
         self.frame_count += 1
-        detected_boxes = [d["box"] for d in detections]
-        updated_track_indices = set()
-        matched_detection_indices = set()
 
-        if self.tracks and detected_boxes:
-            score_matrix = np.zeros((len(self.tracks), len(detected_boxes)), dtype=np.float32)
-            for i, track in enumerate(self.tracks):
-                for j, box in enumerate(detected_boxes):
-                    score_matrix[i, j] = calculate_match_score(track.box, box)
+        # 1. Kalman Predict for all existing tracks
+        for t in self.tracks:
+            t.predict()
 
-            while True:
-                if score_matrix.size == 0:
-                    break
-                max_score = float(np.max(score_matrix))
-                if max_score < self.match_score_threshold:
-                    break
-                i, j = np.unravel_index(np.argmax(score_matrix), score_matrix.shape)
+        # 2. Split detections into high and low confidence
+        high_dets = []
+        low_dets = []
+        for d in detections:
+            conf = d.get("conf", 0.5)
+            if conf >= self.track_high_thresh:
+                high_dets.append(d)
+            elif conf >= self.track_low_thresh:
+                low_dets.append(d)
 
-                track = self.tracks[i]
-                det = detections[j]
-                track.update_box(det["box"], det.get("landmarks"))
+        # 3. Stage 1: Associate active tracks with high-confidence detections
+        if self.tracks and high_dets:
+            cost1 = iou_cost_matrix(self.tracks, high_dets)
+            matches1, unmatched_tracks1, unmatched_high = linear_assignment(cost1, self.match_thresh)
+        else:
+            matches1 = []
+            unmatched_tracks1 = list(range(len(self.tracks)))
+            unmatched_high = list(range(len(high_dets)))
 
-                updated_track_indices.add(i)
-                matched_detection_indices.add(j)
+        for t_idx, d_idx in matches1:
+            det = high_dets[d_idx]
+            self.tracks[t_idx].update_box(det["box"], det.get("landmarks"))
 
-                score_matrix[i, :] = -1.0
-                score_matrix[:, j] = -1.0
+        # 4. Stage 2: Associate remaining unmatched tracks with low-confidence detections
+        remaining_tracks = [self.tracks[i] for i in unmatched_tracks1]
+        if remaining_tracks and low_dets:
+            cost2 = iou_cost_matrix(remaining_tracks, low_dets)
+            matches2, unmatched_tracks2_idx, _ = linear_assignment(cost2, self.match_low_thresh)
+        else:
+            matches2 = []
+            unmatched_tracks2_idx = list(range(len(remaining_tracks)))
 
-        for i, track in enumerate(self.tracks):
-            if i not in updated_track_indices:
-                track.disappeared += 1
+        for rem_idx, d_idx in matches2:
+            track = remaining_tracks[rem_idx]
+            det = low_dets[d_idx]
+            track.update_box(det["box"], det.get("landmarks"))
 
-        for j, det in enumerate(detections):
-            if j not in matched_detection_indices:
-                new_track = Track(
-                    track_id=self.next_track_id,
-                    box=det["box"],
-                    name="Unknown",
-                    employee_id=None,
-                    confidence=None,
-                    distance=None,
-                    landmarks=det.get("landmarks"),
-                )
-                self.next_track_id += 1
-                self.tracks.append(new_track)
+        # 5. Mark lost tracks
+        for rem_idx in unmatched_tracks2_idx:
+            track = remaining_tracks[rem_idx]
+            track.mark_missed()
 
+        # 6. Initialize new tracks from unmatched high-confidence detections
+        for d_idx in unmatched_high:
+            det = high_dets[d_idx]
+            new_track = Track(
+                track_id=self.next_track_id,
+                box=det["box"],
+                landmarks=det.get("landmarks"),
+            )
+            self.next_track_id += 1
+            self.tracks.append(new_track)
+
+        # 7. Purge dead tracks
         self.tracks = [t for t in self.tracks if t.disappeared <= self.max_disappeared]
+
+        # 8. Return currently active (visible) tracks, deduped
         current_active = [t for t in self.tracks if t.disappeared == 0]
         current_active.sort(key=lambda t: (1 if t.employee_id is not None else 0, t.hits), reverse=True)
 
-        deduped_tracks = []
+        deduped = []
         for t in current_active:
             is_dup = False
-            for existing in deduped_tracks:
-                iou = calculate_iou(t.box, existing.box)
-                c_t = box_center(t.box)
-                c_e = box_center(existing.box)
-                w_min = min(t.box[1] - t.box[3], existing.box[1] - existing.box[3])
-                c_dist = float(np.hypot(c_t[0] - c_e[0], c_t[1] - c_e[1]))
-
-                if iou > 0.25 or (w_min > 0 and (c_dist / w_min) < 0.35):
+            for existing in deduped:
+                if calculate_iou(t.box, existing.box) > 0.35:
                     is_dup = True
                     break
             if not is_dup:
-                deduped_tracks.append(t)
+                deduped.append(t)
 
-        return deduped_tracks
+        return deduped
+
+
+FaceTracker = ByteTrack
 
 
 class YOLOFaceDetector:
@@ -430,7 +605,7 @@ class FaceRecognizer:
         self.known_ids = []
         self.known_names = []
         self.known_encodings = []
-        self.tracker = FaceTracker(max_disappeared=5, match_score_threshold=0.20)
+        self.tracker = ByteTrack(track_high_thresh=0.40, track_low_thresh=0.15, match_thresh=0.75, match_low_thresh=0.55, max_disappeared=10)
         self.refresh_known_faces()
 
     def refresh_known_faces(self):
@@ -460,8 +635,8 @@ class FaceRecognizer:
         """
         High-efficiency frame processing pipeline:
         1. Scales frame if large.
-        2. Detects faces with YOLOv8-Face ONNX.
-        3. Associates bounding boxes to persistent tracks (IoU + Centroid).
+        2. Detects faces with YOLOv8-Face ONNX (including low-score candidates for ByteTrack stage 2).
+        3. Associates bounding boxes using ByteTrack + 8-state Kalman Filter motion projection.
         4. Selectively extracts 512-d ArcFace embeddings for new/unknown faces.
         5. Computes Cosine Distance against enrolled face embeddings.
         6. Returns frame dimensions and list of tracked face match dicts.
@@ -469,7 +644,7 @@ class FaceRecognizer:
         frame_bgr = resize_if_large(frame_bgr, max_width=MAX_FRAME_WIDTH)
         h, w = frame_bgr.shape[:2]
 
-        detections = self.detector.detect(frame_bgr, conf_threshold=0.35)
+        detections = self.detector.detect(frame_bgr, conf_threshold=0.15)
         tracked_faces = self.tracker.update(detections)
 
         for t in tracked_faces:
