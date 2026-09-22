@@ -32,6 +32,9 @@ ARCFACE_MODEL_PATH = os.path.join(MODELS_DIR, "w600k_mbf.onnx")
 # Threshold 0.50 provides a high-security decision boundary with zero false accepts.
 MATCH_TOLERANCE = 0.50
 
+# Minimum margin required between 1st and 2nd closest candidate matches to prevent ambiguous identity assignment
+MATCH_MARGIN = 0.15
+
 # Minimum confidence score (%) required to accept and display an enrolled person's identity
 CONFIDENCE_FLOOR = 60.0
 
@@ -484,18 +487,48 @@ class FaceRecognizer:
                         # Cosine similarity: dot product of L2-normalized unit vectors
                         sims = np.dot(self.known_encodings, face_enc)
                         distances = 1.0 - sims
-                        best_idx = int(np.argmin(distances))
-                        min_dist = float(distances[best_idx])
+                        num_enrolled = len(distances)
+
+                        if num_enrolled >= 2:
+                            sorted_indices = np.argsort(distances)
+                            best_idx = int(sorted_indices[0])
+                            second_idx = int(sorted_indices[1])
+                            min_dist = float(distances[best_idx])
+                            second_dist = float(distances[second_idx])
+                            margin = second_dist - min_dist
+                        else:
+                            best_idx = 0
+                            second_idx = None
+                            min_dist = float(distances[0])
+                            second_dist = float("inf")
+                            margin = float("inf")
+
                         conf = distance_to_confidence(min_dist, threshold=MATCH_TOLERANCE)
                         closest_name = self.known_names[best_idx]
                         closest_id = self.known_ids[best_idx]
 
-                        is_accepted = (min_dist <= MATCH_TOLERANCE) and (conf is not None and conf >= CONFIDENCE_FLOOR)
+                        passes_distance = (min_dist <= MATCH_TOLERANCE) and (conf is not None and conf >= CONFIDENCE_FLOOR)
+                        passes_margin = (margin >= MATCH_MARGIN)
+
+                        if passes_distance and passes_margin:
+                            is_accepted = True
+                            decision_reason = "ACCEPTED"
+                        elif not passes_distance:
+                            is_accepted = False
+                            decision_reason = "REJECTED (DISTANCE/CONFIDENCE CHECK FAILED)"
+                        else:
+                            is_accepted = False
+                            decision_reason = f"REJECTED (MARGIN CHECK FAILED: gap={margin:.4f} < {MATCH_MARGIN:.2f})"
+
+                        margin_log_str = (
+                            f" | 2nd: '{self.known_names[second_idx]}' (dist={second_dist:.4f}) | gap={margin:.4f} (margin_req={MATCH_MARGIN:.2f})"
+                            if second_idx is not None else " | Only 1 enrolled candidate"
+                        )
 
                         print(
                             f"[YOLO-ArcFace Match] Track #{t.track_id} | Closest: '{closest_name}' (ID={closest_id}) | "
-                            f"cosine_dist={min_dist:.4f} | threshold={MATCH_TOLERANCE:.2f} | conf={conf}% (floor={CONFIDENCE_FLOOR}%) | "
-                            f"Decision: {'ACCEPTED' if is_accepted else 'REJECTED -> Unknown'}"
+                            f"cosine_dist={min_dist:.4f} | threshold={MATCH_TOLERANCE:.2f}{margin_log_str} | "
+                            f"conf={conf}% (floor={CONFIDENCE_FLOOR}%) | Decision: {decision_reason} -> {'Accepted' if is_accepted else 'Unknown'}"
                         )
 
                         if is_accepted:

@@ -9,7 +9,7 @@ import os
 import sys
 import datetime
 import time
-import sqlite3
+import psycopg2
 import traceback
 from pathlib import Path
 from typing import Optional, List
@@ -23,6 +23,7 @@ from pydantic import BaseModel
 import app.database as database
 from recognizer import (
     FaceRecognizer,
+    CONFIDENCE_FLOOR,
     decode_base64_image,
     compute_encoding_from_bgr,
     compute_encoding_and_box,
@@ -62,14 +63,20 @@ app.add_middleware(
 # Global face recognizer instance
 recognizer_instance: Optional[FaceRecognizer] = None
 
-# In-memory throttles to prevent synchronous SQLite lock contention on high-frequency frame streams
+# In-memory throttles to prevent synchronous database write contention on high-frequency frame streams
 _last_logged_presence = {}  # employee_id -> epoch timestamp
 _presence_cache = []
 _presence_cache_time = 0.0
 
+# Change 2: Consecutive recognition checks required per active track ID before logging to presence_log
+REQUIRED_CONSECUTIVE_MATCHES = 3
+_track_history = {}  # track_id -> {"history": list of employee_ids, "last_seen": float}
+
+
 
 @app.on_event("startup")
 def startup_event():
+    database.init_db()
     get_recognizer()
     print("Database initialized and face recognizer loaded successfully.")
 
@@ -151,20 +158,68 @@ def recognize_frame(req: RecognizeRequest):
 
     result = recognizer.process_bgr_frame(frame_bgr)
 
-    # In-memory throttle: avoid executing synchronous SQLite transactions on every video frame
-    global _presence_cache, _presence_cache_time
+    # In-memory throttle and Change 2 consecutive-frame agreement tracking
+    global _presence_cache, _presence_cache_time, _track_history
     now_ts = time.time()
+
+    # Clean up stale tracks from memory if dictionary grows large
+    if len(_track_history) > 100:
+        stale_tids = [tid for tid, data in _track_history.items() if now_ts - data.get("last_seen", 0.0) > 60.0]
+        for tid in stale_tids:
+            del _track_history[tid]
+
     for m in result.get("matches", []):
+        track_id = m.get("track_id")
         emp_id = m.get("employee_id")
         name = m.get("name")
         conf = m.get("confidence")
-        if emp_id is not None and name != "Unknown" and (conf is None or conf >= 60.0):
-            if now_ts - _last_logged_presence.get(emp_id, 0.0) >= 30.0:
-                _last_logged_presence[emp_id] = now_ts
-                try:
-                    database.log_presence(emp_id, distance=m.get("distance"), min_interval_seconds=30)
-                except Exception as e:
-                    print(f"Error logging presence: {e}")
+
+        # Determine if this frame produced an accepted identity match (passed Change 1 checks)
+        is_accepted_match = (
+            emp_id is not None and
+            name != "Unknown" and
+            (conf is None or conf >= CONFIDENCE_FLOOR)
+        )
+        current_identity = emp_id if is_accepted_match else None
+
+        # Track consecutive recognition results per track ID
+        if track_id is not None:
+            if track_id not in _track_history:
+                _track_history[track_id] = {"history": [], "last_seen": now_ts}
+
+            track_record = _track_history[track_id]
+            track_record["last_seen"] = now_ts
+            history = track_record["history"]
+
+            if current_identity is None:
+                # Identity rejected (failed margin check, distance check, or unknown) -> reset streak
+                history.clear()
+            else:
+                if history and history[-1] != current_identity:
+                    # Identity flipped mid-sequence (e.g. matched as Alice then Bob) -> reset counter
+                    history.clear()
+                history.append(current_identity)
+                if len(history) > REQUIRED_CONSECUTIVE_MATCHES:
+                    history.pop(0)
+
+            # Only write to presence_log when the SAME identity has been accepted for N consecutive checks
+            is_confirmed = (
+                len(history) >= REQUIRED_CONSECUTIVE_MATCHES and
+                all(x == current_identity for x in history) and
+                current_identity is not None
+            )
+
+            if is_confirmed:
+                if now_ts - _last_logged_presence.get(current_identity, 0.0) >= 30.0:
+                    _last_logged_presence[current_identity] = now_ts
+                    try:
+                        database.log_presence(current_identity, distance=m.get("distance"), min_interval_seconds=30)
+                        print(
+                            f"[Attendance Confirmed] Track #{track_id} confirmed as '{name}' (ID={current_identity}) "
+                            f"across {REQUIRED_CONSECUTIVE_MATCHES} consecutive checks. Logged to DB."
+                        )
+                    except Exception as e:
+                        print(f"Error logging presence: {e}")
 
     # Cache get_recently_present for 2.0s to avoid expensive DB queries on every video frame
     if now_ts - _presence_cache_time >= 2.0:
@@ -245,17 +300,17 @@ def enroll_employee(req: EnrollRequest):
     try:
         emp_id = database.add_employee(clean_name, encoding)
         print(f"[Enroll DB SUCCESS] Saved employee '{clean_name}' with ID={emp_id} to database.")
-    except sqlite3.IntegrityError as e:
+    except psycopg2.IntegrityError as e:
         print(f"[Enroll DB INTEGRITY ERROR] Duplicate employee name '{clean_name}': {e}")
         raise HTTPException(
             status_code=400,
             detail=f"Employee '{clean_name}' already exists in the database. Please choose a different name.",
         )
-    except sqlite3.OperationalError as e:
+    except psycopg2.OperationalError as e:
         print(f"[Enroll DB OPERATIONAL ERROR] Database error saving '{clean_name}': {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Database write failed due to lock/concurrency: {str(e)}",
+            detail=f"Database write failed due to connection/concurrency error: {str(e)}",
         )
     except Exception as e:
         print(f"[Enroll DB ERROR] Failed to save '{clean_name}': {e}")
