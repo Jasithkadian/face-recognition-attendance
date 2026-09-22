@@ -1,46 +1,20 @@
 /**
- * FacePulse PRO — Main Application Script
- * Real-time camera stream control, ML bounding box overlays,
- * guided multi-sample enrollment, presence polling, and activity logging.
+ * FacePulse — Kiosk Application Script
+ * Live camera feed, real-time ML face tracking & bounding box overlays,
+ * and active attendee presence monitoring.
+ * Strictly public/read-only — zero administrative tokens or employee rosters.
  */
+
+// Kiosk client identification secret (matches backend KIOSK_SECRET)
+const KIOSK_SECRET = 'facepulse_kiosk_client_default';
 
 // Global State
 let stream = null;
-let recognitionInterval = null;
-let presentPollInterval = null;
+let recognitionLoopActive = false;
 let isProcessingFrame = false;
 let currentCameraDeviceId = null;
 let isFaceGuideVisible = false;
-
-// Guided Enrollment State
-let isEnrolling = false;
-let enrollmentSamples = [];
-let currentPoseIndex = 0;
-let enrollmentTimer = null;
-let enrollmentResetTimer = null;
-let isProcessingEnrollmentTick = false;
-
-// Admin token saved in browser localStorage
-let adminToken = localStorage.getItem('adminToken') || '';
-
-// Pose Guidance sequence for 15 samples
-const ENROLL_POSES = [
-  { title: "Look Straight", prompt: "Look directly into the camera", icon: "👤" },
-  { title: "Look Straight", prompt: "Hold position, looking straight", icon: "👤" },
-  { title: "Turn Left", prompt: "Turn head slightly to your LEFT", icon: "👈" },
-  { title: "Turn Left", prompt: "Hold position, facing slightly LEFT", icon: "👈" },
-  { title: "Turn Right", prompt: "Turn head slightly to your RIGHT", icon: "👉" },
-  { title: "Turn Right", prompt: "Hold position, facing slightly RIGHT", icon: "👉" },
-  { title: "Tilt Up", prompt: "Tilt head slightly UP", icon: "👆" },
-  { title: "Tilt Up", prompt: "Hold position, tilted slightly UP", icon: "👆" },
-  { title: "Tilt Down", prompt: "Tilt head slightly DOWN", icon: "👇" },
-  { title: "Tilt Down", prompt: "Hold position, tilted slightly DOWN", icon: "👇" },
-  { title: "Expression", prompt: "Smile or change expression slightly", icon: "😊" },
-  { title: "Expression", prompt: "Hold expression or neutral gaze", icon: "😊" },
-  { title: "Natural Pose", prompt: "Blink naturally and look straight", icon: "👁️" },
-  { title: "Natural Pose", prompt: "Look straight at the camera lens", icon: "👤" },
-  { title: "Final Sample", prompt: "Final capture: Hold still looking straight", icon: "✨" }
-];
+let presentPollInterval = null;
 
 // DOM Elements
 const webcam = document.getElementById('webcam');
@@ -60,64 +34,16 @@ const statusText = document.getElementById('statusText');
 
 const presentList = document.getElementById('presentList');
 const presentCount = document.getElementById('presentCount');
-const presentTabBadge = document.getElementById('presentTabBadge');
 const kpiPresent = document.getElementById('kpiPresent');
 
-const rosterList = document.getElementById('rosterList');
-const rosterCount = document.getElementById('rosterCount');
-const rosterTabBadge = document.getElementById('rosterTabBadge');
-const kpiEnrolled = document.getElementById('kpiEnrolled');
-
-const enrollAdminBadge = document.getElementById('enrollAdminBadge');
-const enrollLockedView = document.getElementById('enrollLockedView');
-const enrollUnlockedView = document.getElementById('enrollUnlockedView');
-
-// Guided Enroll DOM elements
-const guidedEnrollContainer = document.getElementById('guidedEnrollContainer');
-const poseIcon = document.getElementById('poseIcon');
-const poseTitle = document.getElementById('poseTitle');
-const poseInstruction = document.getElementById('poseInstruction');
-const enrollProgressBar = document.getElementById('enrollProgressBar');
-const sampleCounter = document.getElementById('sampleCounter');
-const enrollPercent = document.getElementById('enrollPercent');
-const sampleThumbnails = document.getElementById('sampleThumbnails');
-const enrollBtn = document.getElementById('enrollBtn');
-const cancelEnrollBtn = document.getElementById('cancelEnrollBtn');
-
-// Initialize application on DOM ready
+// Initialize on DOM ready
 document.addEventListener('DOMContentLoaded', () => {
-  updateAdminUI();
   populateCameras();
   fetchPresentList();
-  fetchRosterList();
-  renderThumbnailSlots();
 
   // Poll active presence list every 3.5 seconds
   presentPollInterval = setInterval(fetchPresentList, 3500);
 });
-
-// ---------------- Tab Navigation ----------------
-
-function switchTab(tabId, btnEl) {
-  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-
-  document.getElementById(tabId).classList.add('active');
-  btnEl.classList.add('active');
-
-  if (tabId === 'logTab') {
-    fetchActivityLog();
-  }
-}
-
-function toggleFaceGuide() {
-  isFaceGuideVisible = !isFaceGuideVisible;
-  if (isFaceGuideVisible && stream) {
-    faceGuide.classList.remove('hidden');
-  } else {
-    faceGuide.classList.add('hidden');
-  }
-}
 
 // ---------------- Camera Stream Logic ----------------
 
@@ -183,7 +109,7 @@ async function startCamera() {
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
 
-    // Real-time recognition loop (non-blocking, self-scheduling at ~10-15 FPS)
+    // Real-time recognition loop (smooth ~10-15 FPS)
     recognitionLoopActive = true;
     runRecognitionLoop();
 
@@ -198,10 +124,6 @@ function stopCamera() {
   if (stream) {
     stream.getTracks().forEach(track => track.stop());
     stream = null;
-  }
-
-  if (isEnrolling) {
-    cancelGuidedEnrollment();
   }
 
   ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
@@ -224,6 +146,15 @@ function switchCamera() {
   }
 }
 
+function toggleFaceGuide() {
+  isFaceGuideVisible = !isFaceGuideVisible;
+  if (isFaceGuideVisible && stream) {
+    faceGuide.classList.remove('hidden');
+  } else {
+    faceGuide.classList.add('hidden');
+  }
+}
+
 function resizeCanvas() {
   if (webcam.videoWidth && webcam.videoHeight) {
     overlayCanvas.width = webcam.clientWidth || 640;
@@ -231,8 +162,11 @@ function resizeCanvas() {
   }
 }
 
-// Helper to capture a downscaled frame canvas element
-function captureFrameCanvas(maxWidth = 360) {
+// ---------------- Frame Processing Timing Instrumentation ----------------
+const frameProcessingTimes = [];
+const PERF_WINDOW_SIZE = 20;
+
+function captureFrameCanvas(maxWidth = 480) {
   const srcWidth = webcam.videoWidth || 640;
   const srcHeight = webcam.videoHeight || 480;
 
@@ -253,33 +187,34 @@ function captureFrameCanvas(maxWidth = 360) {
 
 // ---------------- Real-Time ML Frame Recognition Loop ----------------
 
-let recognitionLoopActive = false;
-
 async function runRecognitionLoop() {
-  if (!recognitionLoopActive || !stream || isEnrolling) return;
+  if (!recognitionLoopActive || !stream) return;
 
   if (!webcam.paused && !webcam.ended && webcam.videoWidth) {
     await captureAndRecognizeFrame();
   }
 
   if (recognitionLoopActive) {
-    // 60ms delay after response completion yields a smooth 10-15 FPS real-time tracking stream
     setTimeout(runRecognitionLoop, 60);
   }
 }
 
 async function captureAndRecognizeFrame() {
-  if (!stream || isProcessingFrame || webcam.paused || webcam.ended || isEnrolling) return;
+  if (!stream || isProcessingFrame || webcam.paused || webcam.ended) return;
 
   isProcessingFrame = true;
+  const frameStartTime = performance.now();
 
   try {
-    const captureCanvas = captureFrameCanvas(360);
-    const base64Image = captureCanvas.toDataURL('image/jpeg', 0.65);
+    const captureCanvas = captureFrameCanvas(480);
+    const base64Image = captureCanvas.toDataURL('image/jpeg', 0.75);
 
     const resp = await fetch('/api/recognize', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Kiosk-Client': KIOSK_SECRET,
+      },
       body: JSON.stringify({ image: base64Image })
     });
 
@@ -288,6 +223,21 @@ async function captureAndRecognizeFrame() {
       drawOverlays(data.width || captureCanvas.width, data.height || captureCanvas.height, data.matches || []);
       if (data.present !== undefined) {
         updatePresentUI(data.present);
+      }
+
+      // Record and log rolling frame processing performance
+      const frameDurationMs = performance.now() - frameStartTime;
+      frameProcessingTimes.push(frameDurationMs);
+      if (frameProcessingTimes.length > PERF_WINDOW_SIZE) {
+        frameProcessingTimes.shift();
+      }
+      if (frameProcessingTimes.length % 10 === 0) {
+        const avgFrameTime = frameProcessingTimes.reduce((a, b) => a + b, 0) / frameProcessingTimes.length;
+        console.log(
+          `[Frame Timing] Last: ${frameDurationMs.toFixed(1)}ms | ` +
+          `Rolling Avg (N=${frameProcessingTimes.length}): ${avgFrameTime.toFixed(1)}ms ` +
+          `(${(1000 / avgFrameTime).toFixed(1)} FPS)`
+        );
       }
     }
   } catch (err) {
@@ -331,7 +281,7 @@ function drawOverlays(frameWidth, frameHeight, matches) {
     ctx.lineWidth = 2.5;
     drawRoundedRect(ctx, x, y, w, h, 8, false, true);
 
-    // Label formatting: Name + Confidence Score (or "Unknown" with red tag)
+    // Label formatting: Name
     let labelText = isRecognized ? m.name : 'Unknown';
     if (isRecognized && m.confidence !== undefined && m.confidence !== null) {
       labelText += ` • ${m.confidence}%`;
@@ -369,294 +319,19 @@ function drawRoundedRect(ctx, x, y, w, h, r, fill, stroke) {
   if (stroke) ctx.stroke();
 }
 
-// ---------------- Guided Multi-Sample Enrollment ----------------
-
-function renderThumbnailSlots() {
-  sampleThumbnails.innerHTML = '';
-  for (let i = 0; i < 15; i++) {
-    const slot = document.createElement('div');
-    slot.className = 'thumb-slot';
-    slot.id = `thumb-${i}`;
-    slot.innerHTML = `<span class="thumb-num">${i + 1}</span>`;
-    sampleThumbnails.appendChild(slot);
-  }
-}
-
-async function startGuidedEnrollment() {
-  const nameInput = document.getElementById('employeeName');
-  const feedback = document.getElementById('enrollFeedback');
-
-  const name = nameInput.value.trim();
-  if (!name) {
-    showFeedback(feedback, 'error', 'Please enter a full name for enrollment.');
-    return;
-  }
-
-  if (!adminToken) {
-    showFeedback(feedback, 'error', '🔒 Admin Token required to enroll personnel. Click "Admin Settings" in header to authenticate.');
-    return;
-  }
-
-  // Clear any delayed reset timer from a previous enrollment immediately
-  if (enrollmentResetTimer) {
-    clearTimeout(enrollmentResetTimer);
-    enrollmentResetTimer = null;
-  }
-
-  // Clear existing capture loop if any
-  if (enrollmentTimer) {
-    clearInterval(enrollmentTimer);
-    enrollmentTimer = null;
-  }
-
-  // Auto-activate camera if not already started
-  if (!stream) {
-    showFeedback(feedback, 'info', 'Activating camera for face enrollment...');
-    try {
-      await startCamera();
-      // Brief pause to allow camera stream dimensions to settle
-      await new Promise(r => setTimeout(r, 500));
-    } catch (err) {
-      showFeedback(feedback, 'error', 'Could not start camera feed. Please allow camera permissions.');
-      return;
-    }
-  }
-
-  // Reset State completely for a fresh enrollment session
-  isEnrolling = true;
-  isProcessingEnrollmentTick = false;
-  enrollmentSamples = [];
-  currentPoseIndex = 0;
-
-  enrollBtn.classList.add('hidden');
-  cancelEnrollBtn.classList.remove('hidden');
-  renderThumbnailSlots();
-  updateEnrollmentUI();
-  hideFeedback(feedback);
-
-  console.log('[Enrollment] Starting 15-sample guided capture loop...');
-  enrollmentTimer = setInterval(processEnrollmentTick, 700);
-}
-
-function updateEnrollmentUI() {
-  const count = Math.min(enrollmentSamples.length, 15);
-  const pct = Math.min(100, Math.round((count / 15) * 100));
-
-  if (currentPoseIndex < ENROLL_POSES.length) {
-    const currentPose = ENROLL_POSES[currentPoseIndex];
-    const poseIconEl = document.getElementById('poseIcon');
-    if (poseIconEl) poseIconEl.textContent = currentPose.icon;
-    if (poseTitle) poseTitle.textContent = `${currentPose.title} (Sample ${Math.min(count + 1, 15)} of 15)`;
-    if (poseInstruction) poseInstruction.textContent = currentPose.prompt;
-  }
-
-  if (sampleCounter) sampleCounter.textContent = `Sample ${count} of 15`;
-  if (enrollPercent) enrollPercent.textContent = `${pct}%`;
-  if (enrollProgressBar) enrollProgressBar.style.width = `${pct}%`;
-}
-
-async function processEnrollmentTick() {
-  // HARD GUARD 1: Immediately return and clear interval if enrollment stopped or >= 15 samples reached
-  if (!isEnrolling || enrollmentSamples.length >= 15) {
-    if (enrollmentTimer) {
-      clearInterval(enrollmentTimer);
-      enrollmentTimer = null;
-    }
-    return;
-  }
-
-  // MUTEX GUARD: Prevent concurrent inflight network calls from overlapping
-  if (isProcessingEnrollmentTick) return;
-  isProcessingEnrollmentTick = true;
-
-  const feedback = document.getElementById('enrollFeedback');
-
-  try {
-    const captureCanvas = captureFrameCanvas(360);
-    const base64Image = captureCanvas.toDataURL('image/jpeg', 0.85);
-
-    // Re-check guard before making fetch
-    if (!isEnrolling || enrollmentSamples.length >= 15) {
-      if (enrollmentTimer) {
-        clearInterval(enrollmentTimer);
-        enrollmentTimer = null;
-      }
-      return;
-    }
-
-    console.log(`[Enrollment] Probing sample ${enrollmentSamples.length + 1} of 15...`);
-
-    // ML Face Check call to backend: verify face detection and duplicate pose rejection
-    const resp = await fetch('/api/enroll-check', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        image: base64Image,
-        existing_images: enrollmentSamples
-      })
-    });
-
-    // HARD GUARD 2: Check again after network response in case state changed
-    if (!isEnrolling || enrollmentSamples.length >= 15) {
-      if (enrollmentTimer) {
-        clearInterval(enrollmentTimer);
-        enrollmentTimer = null;
-      }
-      return;
-    }
-
-    if (resp.ok) {
-      const data = await resp.json();
-      if (data.valid) {
-        // Face verified by face_recognition.face_locations() on backend!
-        const sampleIdx = enrollmentSamples.length;
-        enrollmentSamples.push(base64Image);
-        console.log(`[Enrollment] Captured valid sample ${sampleIdx + 1}/15`);
-
-        // Update Thumbnail slot
-        const thumbSlot = document.getElementById(`thumb-${sampleIdx}`);
-        if (thumbSlot) {
-          thumbSlot.innerHTML = `<img src="${base64Image}" alt="Sample ${sampleIdx + 1}" class="thumb-img">`;
-          thumbSlot.classList.add('active');
-        }
-
-        currentPoseIndex = Math.min(14, enrollmentSamples.length);
-        updateEnrollmentUI();
-
-        // If 15 samples reached, immediately halt interval and finalize
-        if (enrollmentSamples.length >= 15) {
-          console.log('[Enrollment] All 15 samples collected. Finalizing enrollment...');
-          if (enrollmentTimer) {
-            clearInterval(enrollmentTimer);
-            enrollmentTimer = null;
-          }
-          finishGuidedEnrollment();
-        }
-      } else {
-        console.log('[Enrollment] Sample check failed:', data.reason);
-        if (poseInstruction) {
-          poseInstruction.textContent = `⚠️ ${data.reason || 'Position face clearly in frame'}`;
-        }
-      }
-    } else {
-      console.error('[Enrollment] Server error on /api/enroll-check:', resp.status);
-    }
-  } catch (err) {
-    console.warn('Enrollment tick error:', err);
-  } finally {
-    isProcessingEnrollmentTick = false;
-  }
-}
-
-async function finishGuidedEnrollment() {
-  // Immediately halt interval and disarm capture
-  if (enrollmentTimer) {
-    clearInterval(enrollmentTimer);
-    enrollmentTimer = null;
-  }
-  isEnrolling = false;
-  isProcessingEnrollmentTick = false;
-
-  const nameInput = document.getElementById('employeeName');
-  const feedback = document.getElementById('enrollFeedback');
-  const name = nameInput.value.trim();
-
-  // Guarantee strictly at most 15 samples are sent to the backend
-  const samplesToSend = enrollmentSamples.slice(0, 15);
-
-  if (poseTitle) poseTitle.textContent = "Processing Encodings...";
-  if (poseInstruction) poseInstruction.textContent = "Averaging 15 128-d encodings and saving employee profile...";
-  showFeedback(feedback, 'info', 'Submitting 15 samples for numpy mean encoding calculation...');
-
-  try {
-    const resp = await fetch('/api/enroll', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: name,
-        images: samplesToSend,
-        admin_token: adminToken
-      })
-    });
-
-    let data;
-    try {
-      data = await resp.json();
-    } catch {
-      data = { detail: `Server responded with HTTP ${resp.status}: ${resp.statusText || 'Internal Server Error'}` };
-    }
-
-    if (resp.ok) {
-      showFeedback(feedback, 'success', `✓ Successfully enrolled ${name} using 15 real ML face samples!`);
-      nameInput.value = '';
-      fetchRosterList();
-      fetchPresentList();
-
-      if (enrollmentResetTimer) clearTimeout(enrollmentResetTimer);
-      enrollmentResetTimer = setTimeout(() => resetEnrollmentUI(), 2500);
-    } else {
-      showFeedback(feedback, 'error', data.detail || `Enrollment failed with HTTP ${resp.status}.`);
-      cancelGuidedEnrollment();
-    }
-  } catch (err) {
-    console.error('[Enrollment] Exception in finishGuidedEnrollment:', err);
-    showFeedback(feedback, 'error', `Enrollment request failed: ${err.message || 'Connection lost'}`);
-    cancelGuidedEnrollment();
-  }
-}
-
-function cancelGuidedEnrollment() {
-  if (enrollmentResetTimer) {
-    clearTimeout(enrollmentResetTimer);
-    enrollmentResetTimer = null;
-  }
-  if (enrollmentTimer) {
-    clearInterval(enrollmentTimer);
-    enrollmentTimer = null;
-  }
-  isEnrolling = false;
-  isProcessingEnrollmentTick = false;
-  enrollmentSamples = [];
-  currentPoseIndex = 0;
-  resetEnrollmentUI();
-}
-
-function resetEnrollmentUI() {
-  if (enrollmentResetTimer) {
-    clearTimeout(enrollmentResetTimer);
-    enrollmentResetTimer = null;
-  }
-  if (enrollmentTimer) {
-    clearInterval(enrollmentTimer);
-    enrollmentTimer = null;
-  }
-  isEnrolling = false;
-  isProcessingEnrollmentTick = false;
-  enrollmentSamples = [];
-  currentPoseIndex = 0;
-
-  const poseIconEl = document.getElementById('poseIcon');
-  if (poseIconEl) poseIconEl.textContent = "👤";
-  if (poseTitle) poseTitle.textContent = "Ready to Start";
-  if (poseInstruction) poseInstruction.textContent = "Enter name and click 'Start Registration'.";
-  if (sampleCounter) sampleCounter.textContent = "Sample 0 of 15";
-  if (enrollPercent) enrollPercent.textContent = "0%";
-  if (enrollProgressBar) enrollProgressBar.style.width = "0%";
-  if (enrollBtn) enrollBtn.classList.remove('hidden');
-  if (cancelEnrollBtn) cancelEnrollBtn.classList.add('hidden');
-  renderThumbnailSlots();
-}
+// ---------------- Active Presence UI ----------------
 
 function updatePresentUI(presentArray) {
   const present = presentArray || [];
-  presentCount.textContent = `${present.length} Active`;
-  presentTabBadge.textContent = present.length;
-  kpiPresent.textContent = present.length;
+  if (presentCount) presentCount.textContent = `${present.length} Active`;
+  if (kpiPresent) kpiPresent.textContent = present.length;
+
+  if (!presentList) return;
 
   if (present.length === 0) {
     presentList.innerHTML = `
       <div class="empty-state">
-        <p>No active faces in view right now</p>
+        <p>Stand in front of the camera to record attendance</p>
       </div>
     `;
     return;
@@ -687,243 +362,9 @@ async function fetchPresentList() {
   }
 }
 
-async function fetchRosterList() {
-  try {
-    const resp = await fetch('/api/employees');
-    if (!resp.ok) return;
-    const data = await resp.json();
-
-    const employees = data.employees || [];
-    rosterCount.textContent = `${employees.length} Enrolled`;
-    rosterTabBadge.textContent = employees.length;
-    kpiEnrolled.textContent = employees.length;
-
-    if (employees.length === 0) {
-      rosterList.innerHTML = `
-        <div class="empty-state">
-          <p>No individuals enrolled yet.</p>
-        </div>
-      `;
-      return;
-    }
-
-    renderRosterItems(employees);
-  } catch (err) {
-    console.warn('Error fetching roster list:', err);
-  }
-}
-
-function renderRosterItems(employees) {
-  rosterList.innerHTML = employees.map(emp => `
-    <div class="roster-item" data-name="${escapeHtml(emp.name).toLowerCase()}">
-      <div class="roster-item-info">
-        <span class="user-name">${escapeHtml(emp.name)}</span>
-      </div>
-      <button class="btn-icon-del" title="Delete record" onclick="deleteEmployee(${emp.id}, '${escapeHtml(emp.name)}')">
-        🗑️
-      </button>
-    </div>
-  `).join('');
-}
-
-function filterRoster() {
-  const query = document.getElementById('rosterSearch').value.toLowerCase();
-  const items = rosterList.querySelectorAll('.roster-item');
-  items.forEach(item => {
-    const name = item.getAttribute('data-name') || '';
-    item.style.display = name.includes(query) ? 'flex' : 'none';
-  });
-}
-
-async function deleteEmployee(empId, empName) {
-  if (!adminToken) {
-    alert('Admin token required to delete enrolled people.');
-    toggleAdminModal();
-    return;
-  }
-
-  if (!confirm(`Are you sure you want to remove "${empName}" from the roster?`)) {
-    return;
-  }
-
-  try {
-    const resp = await fetch(`/api/employees/${empId}?admin_token=${encodeURIComponent(adminToken)}`, {
-      method: 'DELETE'
-    });
-
-    if (resp.ok) {
-      fetchRosterList();
-      fetchPresentList();
-    } else {
-      const data = await resp.json();
-      alert(data.detail || 'Failed to delete employee record.');
-    }
-  } catch (err) {
-    alert('Server error while deleting employee.');
-  }
-}
-
-// ---------------- Activity Log Fetching ----------------
-
-async function fetchActivityLog() {
-  const tableBody = document.getElementById('activityLogBody');
-  const searchVal = document.getElementById('logSearch').value.trim();
-  const dateVal = document.getElementById('logDate').value.trim();
-
-  let url = '/api/activity-log?limit=100';
-  if (searchVal) url += `&name=${encodeURIComponent(searchVal)}`;
-  if (dateVal) url += `&date=${encodeURIComponent(dateVal)}`;
-
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) return;
-    const data = await resp.json();
-    const logs = data.logs || [];
-
-    if (logs.length === 0) {
-      tableBody.innerHTML = `
-        <tr>
-          <td colspan="5" class="empty-cell">No recognition events logged yet matching criteria.</td>
-        </tr>
-      `;
-      return;
-    }
-
-    tableBody.innerHTML = logs.map(l => {
-      const timeStr = formatTime(l.seen_at);
-      const confStr = l.confidence !== null ? `${l.confidence}%` : 'N/A';
-      const distStr = l.distance !== null ? l.distance.toFixed(4) : 'N/A';
-      const statusBadge = (l.confidence !== null && l.confidence >= 60) ? 
-        '<span class="status-badge success">High Confidence</span>' : 
-        '<span class="status-badge warning">Matched</span>';
-
-      return `
-        <tr>
-          <td class="log-time">${timeStr}</td>
-          <td class="log-name">${escapeHtml(l.name)}</td>
-          <td><strong class="conf-text">${confStr}</strong></td>
-          <td class="dist-text">${distStr}</td>
-          <td>${statusBadge}</td>
-        </tr>
-      `;
-    }).join('');
-  } catch (err) {
-    tableBody.innerHTML = `<tr><td colspan="5" class="empty-cell">Error loading activity log.</td></tr>`;
-  }
-}
-
-// ---------------- Admin Modal Handlers ----------------
-
-function updateAdminUI() {
-  const isUnlocked = adminToken.trim().length > 0;
-
-  if (isUnlocked) {
-    if (enrollAdminBadge) {
-      enrollAdminBadge.textContent = '🔓 Admin Unlocked';
-      enrollAdminBadge.className = 'admin-badge unlocked';
-    }
-    if (enrollLockedView) enrollLockedView.classList.add('hidden');
-    if (enrollUnlockedView) enrollUnlockedView.classList.remove('hidden');
-
-    const lockText = document.getElementById('adminLockText');
-    if (lockText) lockText.textContent = 'Admin Mode (Active)';
-    const lockIcon = document.getElementById('adminLockIcon');
-    if (lockIcon) lockIcon.textContent = '🔓';
-  } else {
-    if (enrollAdminBadge) {
-      enrollAdminBadge.textContent = '🔒 Admin Gated';
-      enrollAdminBadge.className = 'admin-badge locked';
-    }
-    if (enrollLockedView) enrollLockedView.classList.remove('hidden');
-    if (enrollUnlockedView) enrollUnlockedView.classList.add('hidden');
-
-    const lockText = document.getElementById('adminLockText');
-    if (lockText) lockText.textContent = 'Admin Settings';
-    const lockIcon = document.getElementById('adminLockIcon');
-    if (lockIcon) lockIcon.textContent = '🔒';
-  }
-}
-
-async function unlockAdminInline() {
-  const input = document.getElementById('inlineAdminToken');
-  const tokenVal = input.value.trim();
-  const errorEl = document.getElementById('inlineTokenError');
-
-  if (!tokenVal) {
-    showError(errorEl, 'Please enter an admin token.');
-    return;
-  }
-
-  try {
-    const resp = await fetch('/api/verify-token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ admin_token: tokenVal })
-    });
-
-    const data = await resp.json();
-    if (data.valid) {
-      adminToken = tokenVal;
-      localStorage.setItem('adminToken', adminToken);
-      errorEl.classList.add('hidden');
-      updateAdminUI();
-    } else {
-      showError(errorEl, 'Incorrect Admin Token.');
-    }
-  } catch (err) {
-    showError(errorEl, 'Could not connect to server.');
-  }
-}
-
-function toggleAdminModal() {
-  const modal = document.getElementById('adminModal');
-  const tokenInput = document.getElementById('modalAdminToken');
-  tokenInput.value = adminToken;
-  modal.classList.toggle('hidden');
-}
-
-function saveAdminTokenModal() {
-  const tokenInput = document.getElementById('modalAdminToken');
-  const tokenVal = tokenInput.value.trim();
-  adminToken = tokenVal;
-  localStorage.setItem('adminToken', adminToken);
-  updateAdminUI();
-  toggleAdminModal();
-}
-
-// Utility Helpers
-function showFeedback(el, type, msg) {
-  el.className = `feedback-banner ${type}`;
-  el.textContent = msg;
-  el.classList.remove('hidden');
-}
-
-function hideFeedback(el) {
-  el.classList.add('hidden');
-}
-
-function showError(el, msg) {
-  el.textContent = msg;
-  el.classList.remove('hidden');
-}
-
 function escapeHtml(str) {
-  return str.replace(/[&<>'"]/g, 
+  if (!str) return '';
+  return String(str).replace(/[&<>'"]/g, 
     tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
   );
-}
-
-function formatTime(isoStr) {
-  if (!isoStr) return '';
-  try {
-    let str = isoStr;
-    if (typeof str === 'string' && !str.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(str)) {
-      str += 'Z';
-    }
-    const d = new Date(str);
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + 
-           ' (' + d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ')';
-  } catch {
-    return isoStr;
-  }
 }

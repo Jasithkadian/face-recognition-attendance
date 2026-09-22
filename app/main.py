@@ -7,6 +7,7 @@ health checks (for Render keep-alive pings), and static frontend serving.
 
 import os
 import sys
+import io
 import datetime
 import time
 import psycopg2
@@ -16,9 +17,16 @@ from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, Header, Depends, status, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
 import app.database as database
 from recognizer import (
@@ -35,6 +43,11 @@ from recognizer import (
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "admin123")
 if os.environ.get("ADMIN_TOKEN") is None:
     print("[WARNING] ADMIN_TOKEN environment variable is not set. Using default fallback token: 'admin123'")
+
+KIOSK_SECRET = os.environ.get("KIOSK_SECRET", "facepulse_kiosk_client_default")
+if os.environ.get("KIOSK_SECRET") is None:
+    print("[WARNING] KIOSK_SECRET environment variable is not set. Using default fallback: 'facepulse_kiosk_client_default'")
+
 
 app = FastAPI(
     title="Face Pulse Attendance API",
@@ -144,12 +157,23 @@ def verify_token(req: VerifyTokenRequest):
 
 
 @app.post("/api/recognize")
-def recognize_frame(req: RecognizeRequest):
+def recognize_frame(
+    req: RecognizeRequest,
+    x_kiosk_client: Optional[str] = Header(None),
+):
     """
     Accepts a base64 camera frame, performs fast face detection + IoU/centroid tracking + recognition,
     logs presence in DB with in-memory throttling, and returns tracked bounding boxes and names.
+    Protected by lightweight X-Kiosk-Client header matching KIOSK_SECRET.
     """
+    if not x_kiosk_client or x_kiosk_client != KIOSK_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Invalid or missing X-Kiosk-Client header.",
+        )
+
     recognizer = get_recognizer()
+    t_start = time.perf_counter()
 
     try:
         frame_bgr = decode_base64_image(req.image)
@@ -230,6 +254,7 @@ def recognize_frame(req: RecognizeRequest):
             print(f"Error refreshing presence cache: {e}")
 
     result["present"] = _presence_cache
+    result["proc_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
     return result
 
 
@@ -344,22 +369,41 @@ def get_currently_present(window_seconds: int = 20):
     return {"present": present}
 
 
+def check_admin_token(
+    admin_token: Optional[str] = None,
+    token: Optional[str] = None,
+    x_admin_token: Optional[str] = None,
+):
+    """Verifies that a valid ADMIN_TOKEN is provided via query parameter or header."""
+    provided = admin_token or token or x_admin_token
+    if not provided or provided != ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: Invalid or missing admin token.",
+        )
+
+
 @app.get("/api/employees")
-def get_employees():
-    """Get list of all enrolled employees."""
+def get_employees(
+    admin_token: Optional[str] = None,
+    token: Optional[str] = None,
+    x_admin_token: Optional[str] = Header(None),
+):
+    """Get list of all enrolled employees. Gated by ADMIN_TOKEN."""
+    check_admin_token(admin_token, token, x_admin_token)
     employees = database.get_all_people()
     return {"employees": employees}
 
 
 @app.delete("/api/employees/{employee_id}")
-def delete_employee(employee_id: int, admin_token: str):
-    """Delete an enrolled employee by ID. Gated by admin_token."""
-    if admin_token != ADMIN_TOKEN:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unauthorized: Incorrect admin token.",
-        )
-
+def delete_employee(
+    employee_id: int,
+    admin_token: Optional[str] = None,
+    token: Optional[str] = None,
+    x_admin_token: Optional[str] = Header(None),
+):
+    """Delete an enrolled employee by ID. Gated by ADMIN_TOKEN."""
+    check_admin_token(admin_token, token, x_admin_token)
     database.delete_employee(employee_id)
     if recognizer_instance:
         recognizer_instance.refresh_known_faces()
@@ -368,17 +412,240 @@ def delete_employee(employee_id: int, admin_token: str):
 
 
 @app.get("/api/activity-log")
-def get_activity_log(limit: int = 100, name: Optional[str] = None, date: Optional[str] = None):
-    """Get detailed timestamped activity log records with ML match distance & confidence scores."""
+def get_activity_log(
+    limit: int = 100,
+    name: Optional[str] = None,
+    date: Optional[str] = None,
+    admin_token: Optional[str] = None,
+    token: Optional[str] = None,
+    x_admin_token: Optional[str] = Header(None),
+):
+    """Get detailed timestamped activity log records with ML match distance & confidence scores. Gated by ADMIN_TOKEN."""
+    check_admin_token(admin_token, token, x_admin_token)
     logs = database.get_activity_log(limit=limit, name_filter=name, date_filter=date)
     return {"logs": logs}
 
 
 @app.get("/api/today-summary")
-def get_today_summary():
-    """Get attendance log summary for today."""
+def get_today_summary(
+    admin_token: Optional[str] = None,
+    token: Optional[str] = None,
+    x_admin_token: Optional[str] = Header(None),
+):
+    """Get attendance log summary for today. Gated by ADMIN_TOKEN."""
+    check_admin_token(admin_token, token, x_admin_token)
     summary = database.get_today_summary()
     return {"summary": summary}
+
+
+@app.get("/api/admin/status")
+def get_admin_status(
+    admin_token: Optional[str] = None,
+    token: Optional[str] = None,
+    x_admin_token: Optional[str] = Header(None),
+):
+    """System and database pool health check. Gated by ADMIN_TOKEN."""
+    check_admin_token(admin_token, token, x_admin_token)
+    pool_status = database.get_pool_status()
+    employees = database.get_all_people()
+    return {
+        "status": "online",
+        "pool": pool_status,
+        "enrolled_count": len(employees),
+    }
+
+
+def format_time_clean(iso_ts: Optional[str]) -> str:
+    """Helper to convert ISO timestamp to clean readable local/formatted time."""
+    if not iso_ts:
+        return "N/A"
+    try:
+        clean_str = str(iso_ts)
+        if not clean_str.endswith("Z") and "+" not in clean_str and "-" not in clean_str[10:]:
+            clean_str += "+00:00"
+        dt = datetime.datetime.fromisoformat(clean_str)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(iso_ts)
+
+
+@app.get("/api/report/today.xlsx")
+def download_today_report_excel(
+    admin_token: Optional[str] = None,
+    token: Optional[str] = None,
+    x_admin_token: Optional[str] = Header(None)
+):
+    """
+    Downloads today's attendance summary report as a formatted Excel spreadsheet (.xlsx).
+    Gated behind ADMIN_TOKEN authentication. Generated completely in memory.
+    """
+    check_admin_token(admin_token, token, x_admin_token)
+
+    summary = database.get_today_summary()
+    today_str = datetime.date.today().isoformat()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Today's Attendance"
+
+    # Title Row
+    ws.merge_cells("A1:D1")
+    title_cell = ws["A1"]
+    title_cell.value = f"Attendance Report — {today_str}"
+    title_cell.font = Font(size=14, bold=True, color="1E293B")
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    # Header Row
+    headers = ["Name", "First Seen", "Last Seen", "Total Detections"]
+    ws.append([])
+    ws.append(headers)
+    ws.row_dimensions[3].height = 24
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+    center_align = Alignment(horizontal="center", vertical="center")
+    left_align = Alignment(horizontal="left", vertical="center")
+
+    thin_border = Border(
+        left=Side(style="thin", color="E2E8F0"),
+        right=Side(style="thin", color="E2E8F0"),
+        top=Side(style="thin", color="E2E8F0"),
+        bottom=Side(style="thin", color="E2E8F0"),
+    )
+
+    for col_idx in range(1, 5):
+        cell = ws.cell(row=3, column=col_idx)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align if col_idx > 1 else left_align
+        cell.border = thin_border
+
+    # Data Rows
+    row_num = 4
+    if summary:
+        for s in summary:
+            f_seen = format_time_clean(s.get("first_seen"))
+            l_seen = format_time_clean(s.get("last_seen"))
+            dets = s.get("detections", 0)
+            ws.append([s.get("name", "Unknown"), f_seen, l_seen, dets])
+
+            row_fill = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid") if row_num % 2 == 0 else None
+            for col_idx in range(1, 5):
+                cell = ws.cell(row=row_num, column=col_idx)
+                cell.border = thin_border
+                if row_fill:
+                    cell.fill = row_fill
+                cell.alignment = center_align if col_idx > 1 else left_align
+            row_num += 1
+    else:
+        ws.merge_cells("A4:D4")
+        empty_cell = ws["A4"]
+        empty_cell.value = "No attendance records logged yet today."
+        empty_cell.alignment = Alignment(horizontal="center", vertical="center")
+        empty_cell.font = Font(italic=True, color="64748B")
+
+    # Column Widths
+    col_widths = {"A": 24, "B": 24, "C": 24, "D": 18}
+    for col_letter, width in col_widths.items():
+        ws.column_dimensions[col_letter].width = width
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = f"attendance_report_{today_str}.xlsx"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/report/today.pdf")
+def download_today_report_pdf(
+    admin_token: Optional[str] = None,
+    token: Optional[str] = None,
+    x_admin_token: Optional[str] = Header(None)
+):
+    """
+    Downloads today's attendance summary report as a PDF document.
+    Gated behind ADMIN_TOKEN authentication. Generated completely in memory.
+    """
+    check_admin_token(admin_token, token, x_admin_token)
+
+    summary = database.get_today_summary()
+    today_str = datetime.date.today().isoformat()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=letter,
+        leftMargin=36,
+        rightMargin=36,
+        topMargin=36,
+        bottomMargin=36,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#1e293b"),
+        alignment=1,  # Center
+        spaceAfter=15,
+    )
+
+    elements = [
+        Paragraph(f"Attendance Report — {today_str}", title_style),
+        Spacer(1, 10),
+    ]
+
+    table_data = [["Name", "First Seen", "Last Seen", "Total Detections"]]
+    if summary:
+        for s in summary:
+            f_seen = format_time_clean(s.get("first_seen"))
+            l_seen = format_time_clean(s.get("last_seen"))
+            dets = str(s.get("detections", 0))
+            table_data.append([s.get("name", "Unknown"), f_seen, l_seen, dets])
+    else:
+        table_data.append(["No attendees logged today", "-", "-", "0"])
+
+    col_widths = [140, 150, 150, 100]
+    t = Table(table_data, colWidths=col_widths, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e293b")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 10),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+        ("TOPPADDING", (0, 0), (-1, 0), 8),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("ALIGN", (0, 1), (0, -1), "LEFT"),
+        ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+        ("TOPPADDING", (0, 1), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), 6),
+    ]))
+
+    elements.append(t)
+    doc.build(elements)
+    buf.seek(0)
+
+    filename = f"attendance_report_{today_str}.pdf"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 
 # ---------------- Static Files & UI Mounting ----------------
@@ -396,3 +663,11 @@ def read_root():
     if index_file.exists():
         return FileResponse(str(index_file))
     return {"message": "Face Pulse API is running. Static frontend not found."}
+
+
+@app.get("/admin")
+def read_admin():
+    admin_file = STATIC_DIR / "admin.html"
+    if admin_file.exists():
+        return FileResponse(str(admin_file))
+    return {"message": "Admin dashboard not found."}

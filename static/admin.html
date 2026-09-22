@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FacePulse — Admin Console</title>
+  <!-- Google Fonts: Plus Jakarta Sans -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <!-- ==================== 1. Token Gate (Shown when unauthenticated) ==================== -->
+  <div id="tokenGate" class="token-gate-wrap">
+    <div class="token-gate-card">
+      <div class="token-gate-icon">🔐</div>
+      <h2>Admin Authentication</h2>
+      <p>Enter your <strong>ADMIN_TOKEN</strong> to access employee records, attendance reports, and system telemetry.</p>
+      
+      <form id="tokenGateForm" class="token-gate-form" onsubmit="handleTokenSubmit(event)">
+        <div class="form-group" style="text-align: left;">
+          <input 
+            type="password" 
+            id="tokenInput" 
+            class="text-input" 
+            placeholder="Enter ADMIN_TOKEN" 
+            autocomplete="current-password" 
+            required 
+            autofocus
+          >
+        </div>
+        <div id="tokenError" class="alert-error hidden" style="margin-top: 0.25rem;"></div>
+        <button type="submit" id="tokenSubmitBtn" class="btn-primary btn-block">
+          Unlock Console
+        </button>
+      </form>
+
+      <div class="token-gate-links">
+        <a href="/">← Return to Public Kiosk</a>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ==================== 2. Admin Dashboard (Hidden until unlocked) ==================== -->
+  <div id="adminDashboard" class="app-container hidden">
+    
+    <!-- Admin Header -->
+    <header class="navbar">
+      <div class="brand">
+        <div class="brand-text">
+          <h1>FacePulse Admin Console</h1>
+          <p class="brand-sub">Attendance records, reporting, employee registration & system status</p>
+        </div>
+      </div>
+
+      <!-- Stat Counters & Pool Status -->
+      <div class="header-kpis">
+        <div class="kpi-chip">
+          <div class="kpi-data">
+            <span class="kpi-label">Today's Attendees</span>
+            <span id="kpiToday" class="kpi-val">0</span>
+          </div>
+        </div>
+        <div class="kpi-chip">
+          <div class="kpi-data">
+            <span class="kpi-label">Enrolled Roster</span>
+            <span id="kpiEnrolled" class="kpi-val">0</span>
+          </div>
+        </div>
+        <div class="kpi-chip">
+          <div class="kpi-data">
+            <span class="kpi-label">Supabase Pool</span>
+            <span id="kpiPool" class="kpi-val" style="font-size: 0.95rem; font-weight: 600;">Connecting...</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <a href="/" class="btn-secondary btn-sm" style="text-decoration: none;">
+          🖥️ View Kiosk
+        </a>
+        <button class="btn-secondary btn-sm" onclick="logoutAdmin()">
+          🔒 Lock Console
+        </button>
+      </div>
+    </header>
+
+    <!-- Admin Navigation Tabs -->
+    <div class="tab-nav" style="margin-top: 0.25rem;">
+      <button class="tab-btn active" onclick="switchAdminTab('todayTab', this)">
+        <span>Today's Summary</span>
+        <span id="todayTabBadge" class="tab-badge">0</span>
+      </button>
+      <button class="tab-btn" onclick="switchAdminTab('logTab', this)">
+        <span>Activity Log</span>
+      </button>
+      <button class="tab-btn" onclick="switchAdminTab('rosterTab', this)">
+        <span>Enrolled Roster</span>
+        <span id="rosterTabBadge" class="tab-badge">0</span>
+      </button>
+      <button class="tab-btn" onclick="switchAdminTab('enrollTab', this)">
+        <span>Register Person (15 Poses)</span>
+      </button>
+      <button class="tab-btn" onclick="switchAdminTab('systemTab', this)">
+        <span>System & Pool Health</span>
+      </button>
+    </div>
+
+    <!-- ==================== Tab 1: Today's Summary & Reports ==================== -->
+    <div id="todayTab" class="tab-content active">
+      <section class="card panel-card">
+        <div class="card-header">
+          <div class="card-title">
+            <h2>Today's Attendance Summary</h2>
+            <p class="card-subtitle">Aggregated first-seen, last-seen, and detection counts for today</p>
+          </div>
+          <div class="header-actions">
+            <button class="btn-secondary btn-sm" onclick="downloadReport('xlsx')">
+              📥 Download Excel (.xlsx)
+            </button>
+            <button class="btn-secondary btn-sm" onclick="downloadReport('pdf')">
+              📄 Download PDF (.pdf)
+            </button>
+            <button class="btn-secondary btn-sm" onclick="fetchTodaySummary()">
+              🔄 Refresh
+            </button>
+          </div>
+        </div>
+
+        <div class="log-table-wrapper">
+          <table class="log-table">
+            <thead>
+              <tr>
+                <th>Employee Name</th>
+                <th>First Seen Today</th>
+                <th>Last Seen Today</th>
+                <th>Total Confirmed Detections</th>
+              </tr>
+            </thead>
+            <tbody id="todaySummaryBody">
+              <tr>
+                <td colspan="4" class="empty-cell">Loading today's attendance summary...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- ==================== Tab 2: Activity Log ==================== -->
+    <div id="logTab" class="tab-content">
+      <section class="card panel-card">
+        <div class="card-header">
+          <div class="card-title">
+            <h2>Presence Activity Log</h2>
+            <p class="card-subtitle">Detailed verification timestamps with ML cosine distances and confidence scores</p>
+          </div>
+          <div class="header-actions">
+            <button class="btn-secondary btn-sm" onclick="fetchActivityLog()">🔄 Refresh</button>
+          </div>
+        </div>
+
+        <div class="log-filter-bar">
+          <input type="text" id="logSearch" placeholder="Filter by employee name..." class="text-input text-input-sm" onkeyup="debounceFetchActivityLog()">
+          <input type="date" id="logDate" class="text-input text-input-sm" onchange="fetchActivityLog()">
+        </div>
+
+        <div class="log-table-wrapper">
+          <table class="log-table">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Employee</th>
+                <th>Confidence Score</th>
+                <th>Vector Distance</th>
+                <th>Verification Status</th>
+              </tr>
+            </thead>
+            <tbody id="activityLogBody">
+              <tr>
+                <td colspan="5" class="empty-cell">Loading activity records...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- ==================== Tab 3: Enrolled Roster ==================== -->
+    <div id="rosterTab" class="tab-content">
+      <section class="card panel-card">
+        <div class="card-header">
+          <div class="card-title">
+            <h2>Enrolled Employees</h2>
+            <p class="card-subtitle">Active face encodings registered in Supabase PostgreSQL</p>
+          </div>
+          <span id="rosterCount" class="count-badge">0 Enrolled</span>
+        </div>
+
+        <div class="search-box" style="padding: 1rem 1.25rem 0.5rem;">
+          <input type="text" id="rosterSearch" placeholder="Search roster by employee name..." onkeyup="filterRoster()" class="text-input text-input-sm">
+        </div>
+
+        <div id="rosterList" class="roster-list" style="padding: 1rem 1.25rem;">
+          <div class="empty-state">
+            <p>Loading roster...</p>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ==================== Tab 4: Register Person (15-Pose Guided Flow) ==================== -->
+    <div id="enrollTab" class="tab-content">
+      <section class="card panel-card">
+        <div class="card-header">
+          <div class="card-title">
+            <h2>Multi-Angle Guided Employee Registration</h2>
+            <p class="card-subtitle">Captures 15 distinct facial angles to build a high-precision 128-d centroid encoding</p>
+          </div>
+        </div>
+
+        <div style="padding: 1.25rem; max-width: 600px; margin: 0 auto; width: 100%;">
+          
+          <!-- Camera Preview for Enrollment -->
+          <div class="enroll-cam-preview">
+            <video id="enrollWebcam" autoplay playsinline muted></video>
+            <div id="enrollCamPlaceholder" class="camera-placeholder">
+              <div class="placeholder-content">
+                <p style="margin-bottom: 0.75rem; font-size: 0.88rem;">Camera is currently idle for registration.</p>
+                <button class="btn-primary btn-sm" onclick="startEnrollCamera()">Start Camera</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group" style="margin-bottom: 1rem;">
+            <label for="employeeName" style="font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Full Name</label>
+            <input type="text" id="employeeName" placeholder="e.g. Jane Doe" class="text-input" autocomplete="off">
+          </div>
+
+          <div id="guidedEnrollContainer" class="guided-enroll-box">
+            <div class="guided-header">
+              <div class="pose-icon" id="poseIcon">👤</div>
+              <div class="pose-info">
+                <h4 id="poseTitle">Ready to Register</h4>
+                <p id="poseInstruction">Start camera, enter name, and click "Start 15-Pose Capture".</p>
+              </div>
+            </div>
+
+            <div class="progress-bar-wrapper">
+              <div id="enrollProgressBar" class="progress-bar-fill" style="width: 0%;"></div>
+            </div>
+            <div class="progress-text-row">
+              <span id="sampleCounter">Sample 0 of 15</span>
+              <span id="enrollPercent">0%</span>
+            </div>
+
+            <div id="sampleThumbnails" class="thumbnails-grid"></div>
+          </div>
+
+          <div class="enroll-actions" style="margin-top: 1rem; display: flex; flex-direction: column; gap: 0.5rem;">
+            <button id="enrollBtn" class="btn-accent btn-block" onclick="startGuidedEnrollment()">
+              Start 15-Pose Capture
+            </button>
+            <button id="cancelEnrollBtn" class="btn-secondary btn-block hidden" onclick="cancelGuidedEnrollment()">
+              Cancel Registration
+            </button>
+          </div>
+
+          <div id="enrollFeedback" class="feedback-banner hidden" style="margin-top: 1rem;"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ==================== Tab 5: System & Pool Health ==================== -->
+    <div id="systemTab" class="tab-content">
+      <section class="card panel-card">
+        <div class="card-header">
+          <div class="card-title">
+            <h2>System Health & Database Pool Telemetry</h2>
+            <p class="card-subtitle">Supabase PostgreSQL connection pool metrics & runtime health</p>
+          </div>
+          <button class="btn-secondary btn-sm" onclick="fetchSystemStatus()">🔄 Refresh Status</button>
+        </div>
+
+        <div style="padding: 1.25rem;">
+          <div class="status-grid">
+            <div class="metric-card">
+              <span class="metric-card-label">Active Connections</span>
+              <span id="metricActiveConn" class="metric-card-val">-</span>
+              <span class="metric-card-sub">Currently checked out</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-card-label">Idle Pool Connections</span>
+              <span id="metricIdleConn" class="metric-card-val">-</span>
+              <span class="metric-card-sub">Ready for incoming requests</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-card-label">Max Connections</span>
+              <span id="metricMaxConn" class="metric-card-val">-</span>
+              <span class="metric-card-sub">Pool upper limit</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-card-label">Total Enrolled Faces</span>
+              <span id="metricEnrolledCount" class="metric-card-val">-</span>
+              <span class="metric-card-sub">Stored 128-d vectors</span>
+            </div>
+          </div>
+
+          <div style="background: #FFFFFF; border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 1.25rem;">
+            <h4 style="font-size: 0.92rem; font-weight: 700; margin-bottom: 0.5rem;">Database Architecture</h4>
+            <p style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.5;">
+              The system connects to Supabase PostgreSQL over a secure SSL session using a <code>ThreadedConnectionPool</code>. 
+              Connections are automatically acquired and returned to the pool using RAII context managers (<code>with get_connection() as conn:</code>), 
+              guaranteeing zero connection leaks and preventing pool exhaustion across simultaneous camera streams and administrative requests.
+            </p>
+          </div>
+        </div>
+      </section>
+    </div>
+
+  </div>
+
+  <script src="/static/admin.js"></script>
+</body>
+</html>
