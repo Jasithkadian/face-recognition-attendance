@@ -1,12 +1,40 @@
-opencv-python-headless>=4.8.0.76
-onnxruntime>=1.16.0
-numpy>=1.24.0
-Pillow>=10.0.0
+# ==============================================================================
+# FacePulse AI — Requirements
+# ==============================================================================
+
+# Core Web Framework & High-Performance ASGI Server
 fastapi>=0.100.0
 uvicorn[standard]>=0.22.0
-python-multipart>=0.0.6
 pydantic>=2.0.0
+python-multipart>=0.0.6
+
+# Computer Vision & Math Operations
+numpy>=1.24.0
+Pillow>=10.0.0
+opencv-python>=4.8.0.76
+
+# Machine Learning Runtime (Default CPU; auto-fallback supported)
+onnxruntime>=1.16.0
+
+# Database & Environment
 psycopg2-binary>=2.9.9
 python-dotenv>=1.0.0
+
+# Reporting & Attendance Exports (Excel & PDF)
 openpyxl>=3.1.0
 reportlab>=4.0.0
+
+# Testing & HTTP Utilities
+httpx>=0.24.0
+
+# ==============================================================================
+# OPTIONAL HARDWARE ACCELERATION:
+# The application automatically detects GPU vs CPU.
+# If you have an NVIDIA GPU (with CUDA installed):
+#     pip uninstall -y onnxruntime
+#     pip install onnxruntime-gpu
+# If you have an AMD or Intel GPU on Windows (DirectX 12):
+#     pip uninstall -y onnxruntime
+#     pip install onnxruntime-directml
+# Otherwise, default onnxruntime runs seamlessly on CPU with zero configuration.
+# ==============================================================================

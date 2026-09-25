@@ -452,6 +452,33 @@ class ByteTrack:
 FaceTracker = ByteTrack
 
 
+def create_ort_session(model_path, opts=None):
+    """
+    Creates an ONNX Runtime InferenceSession trying GPU acceleration providers first
+    (CUDAExecutionProvider, DmlExecutionProvider), automatically falling back to
+    CPUExecutionProvider if GPU initialization fails or is unavailable.
+    """
+    if os.environ.get("FORCE_CPU", "").strip().lower() in ("1", "true", "yes"):
+        print(f"[Device] FORCE_CPU set: loading {os.path.basename(model_path)} on CPUExecutionProvider")
+        return ort.InferenceSession(model_path, sess_options=opts, providers=["CPUExecutionProvider"])
+
+    available = ort.get_available_providers()
+    preferred_gpu_providers = ["CUDAExecutionProvider", "DmlExecutionProvider"]
+    candidate_gpu_providers = [p for p in preferred_gpu_providers if p in available]
+
+    for prov in candidate_gpu_providers:
+        try:
+            session = ort.InferenceSession(model_path, sess_options=opts, providers=[prov, "CPUExecutionProvider"])
+            print(f"[Device] Accelerated: Loaded {os.path.basename(model_path)} using {prov}")
+            return session
+        except Exception as err:
+            print(f"[Device Warning] GPU provider '{prov}' failed for {os.path.basename(model_path)}: {err}. Falling back...")
+
+    # CPU Fallback
+    print(f"[Device] Loaded {os.path.basename(model_path)} using CPUExecutionProvider")
+    return ort.InferenceSession(model_path, sess_options=opts, providers=["CPUExecutionProvider"])
+
+
 class YOLOFaceDetector:
     """YOLOv8-Face ONNX Inference Engine for real-time face detection and 5-point landmark prediction."""
     def __init__(self, model_path=YOLO_MODEL_PATH):
@@ -460,7 +487,7 @@ class YOLOFaceDetector:
         opts.intra_op_num_threads = 2
         opts.inter_op_num_threads = 1
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        self.session = ort.InferenceSession(self.model_path, sess_options=opts, providers=["CPUExecutionProvider"])
+        self.session = create_ort_session(self.model_path, opts=opts)
         self.input_name = self.session.get_inputs()[0].name
 
     def detect(self, img_bgr, conf_threshold=0.35):
@@ -532,7 +559,7 @@ class ArcFaceEmbedder:
         opts.intra_op_num_threads = 2
         opts.inter_op_num_threads = 1
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        self.session = ort.InferenceSession(self.model_path, sess_options=opts, providers=["CPUExecutionProvider"])
+        self.session = create_ort_session(self.model_path, opts=opts)
         self.input_name = self.session.get_inputs()[0].name
 
     def extract_embedding(self, img_bgr, box, landmarks=None):
